@@ -269,23 +269,20 @@ button {
   }
 }
 
-/* 翻譯覆蓋框 */
+/* 翻譯概蓋框（背景色與文字色由 JS 動態設定） */
 .translation-box {
   position: absolute;
-  background: rgba(10, 10, 20, 0.82);
-  border-radius: 4px;
-  padding: 4px 6px;
+  border-radius: 3px;
+  padding: 2px 5px;
   pointer-events: none;
   display: flex;
   align-items: center;
   box-sizing: border-box;
-}
-
-.translation-text {
-  color: #ffffff;
-  font-size: 13px;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1.3;
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* 處理中遮罩 */
