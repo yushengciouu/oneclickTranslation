@@ -1,7 +1,7 @@
 ﻿use base64::{engine::general_purpose, Engine as _};
 use screenshots::Screen;
 use screenshots::image::{DynamicImage, GrayImage, ImageFormat};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -247,6 +247,59 @@ fn close_overlay(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct VisionLine {
+    original: String,
+    translated: String,
+}
+
+/// 用視覺語言模型一次完成 OCR + 翻譯，回傳每行原文與譯文
+#[tauri::command]
+async fn vision_ocr_translate(image_base64: String) -> Result<Vec<VisionLine>, String> {
+    // 去掉 data URL 前綴（"data:image/png;base64,"）
+    let b64 = if let Some(idx) = image_base64.find(',') {
+        image_base64[idx + 1..].to_string()
+    } else {
+        image_base64
+    };
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "gemma-4:31B",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image/png;base64,{}", b64) }
+                },
+                {
+                    "type": "text",
+                    "text": "Translate ALL text visible in this image into English. Output ONLY the translated text, no explanation, no original text, no markdown."
+                }
+            ]
+        }],
+        "max_tokens": 1000,
+        "temperature": 0.1
+    });
+
+    let resp = client
+        .post("http://192.168.39.143:8001/v1/chat/completions")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let translated = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("Invalid model response")?
+        .trim()
+        .to_string();
+
+    Ok(vec![VisionLine { original: String::new(), translated }])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -269,7 +322,8 @@ pub fn run() {
             start_capture,
             close_overlay,
             ocr_image,
-            translate_lines
+            translate_lines,
+            vision_ocr_translate
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

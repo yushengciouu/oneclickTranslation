@@ -7,7 +7,7 @@ type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
 
 interface Rect { x: number; y: number; width: number; height: number; }
 
-interface OcrLine { text: string; x: number; y: number; width: number; height: number; }
+interface VisionLine { original: string; translated: string; }
 
 interface TranslationLine {
   original: string;
@@ -143,61 +143,42 @@ function App() {
       const scaleX = imgEl.naturalWidth / window.innerWidth;
       const scaleY = imgEl.naturalHeight / window.innerHeight;
 
-      // padding 後的裁切範圍（CSS pixels）
-      const PAD = 30;
-      const cssX = Math.max(0, activeSelection.x - PAD);
-      const cssY = Math.max(0, activeSelection.y - PAD);
-      const cssW = Math.min(window.innerWidth - cssX, activeSelection.width + PAD * 2);
-      const cssH = Math.min(window.innerHeight - cssY, activeSelection.height + PAD * 2);
-
-      // 裁切時使用原生像素座標，確保 OCR 拿到完整解析度
+      // LLM 視覺不需要 padding，嚴格裁切選取範圍，避免翻譯到範圍外的文字
       const nativeRect: Rect = {
-        x: Math.round(cssX * scaleX),
-        y: Math.round(cssY * scaleY),
-        width: Math.round(cssW * scaleX),
-        height: Math.round(cssH * scaleY),
+        x: Math.round(activeSelection.x * scaleX),
+        y: Math.round(activeSelection.y * scaleY),
+        width: Math.round(activeSelection.width * scaleX),
+        height: Math.round(activeSelection.height * scaleY),
       };
       const cropped = await cropImage(screenshot, nativeRect);
-      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped });
-      if (ocrLines.length === 0) {
+
+      // 使用視覺語言模型一次完成 OCR + 翻譯
+      const visionLines = await invoke<VisionLine[]>("vision_ocr_translate", { imageBase64: cropped });
+      if (visionLines.length === 0) {
         setError("未辨識到任何文字");
         setMode("selecting");
         return;
       }
-      const texts = ocrLines.map((l) => l.text);
-      const translated = await invoke<string[]>("translate_lines", { texts });
 
-      const result: TranslationLine[] = ocrLines.map((line, i) => {
-        // OCR 座標是相對於 nativeRect 的原生像素，換算回 CSS pixels
-        const fx = cssX + line.x / scaleX;
-        const fy = cssY + line.y / scaleY;
-        const fw = line.width / scaleX;
-        const fh = line.height / scaleY;
-
-        // 限制在原始選取範圍內，避免超出
-        const clampX = Math.max(activeSelection.x, fx);
-        const clampY = Math.max(activeSelection.y, fy);
-        const clampW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - clampX;
-        const clampH = Math.min(activeSelection.y + activeSelection.height, fy + fh) - clampY;
-        if (clampW <= 2 || clampH <= 2) return null; // 完全在選取範圍外，丟棄
-
-        // 用原生像素座標取樣背景色
-        const bgColor = sampleBgColor(
-          imgEl,
-          clampX * scaleX, clampY * scaleY,
-          Math.max(1, clampW * scaleX), Math.max(1, clampH * scaleY),
-        );
-        return {
-          original: line.text,
-          translated: translated[i] ?? "",
-          x: clampX,
-          y: clampY,
-          width: clampW,
-          height: clampH,
-          bgColor,
-          textColor: contrastColor(bgColor),
-        };
-      }).filter((t): t is TranslationLine => t !== null);
+      // 整個選取範圍用一個框覆蓋，不論 LLM 回傳幾行都不會重疊或超出
+      const allTranslated = visionLines.map(l => l.translated).join("\n");
+      const bgColor = sampleBgColor(
+        imgEl,
+        activeSelection.x * scaleX,
+        activeSelection.y * scaleY,
+        activeSelection.width * scaleX,
+        activeSelection.height * scaleY,
+      );
+      const result: TranslationLine[] = [{
+        original: visionLines.map(l => l.original).join("\n"),
+        translated: allTranslated,
+        x: activeSelection.x,
+        y: activeSelection.y,
+        width: activeSelection.width,
+        height: activeSelection.height,
+        bgColor,
+        textColor: contrastColor(bgColor),
+      }];
 
       setTranslations(result);
       setMode("result");
@@ -254,8 +235,8 @@ function App() {
       )}
 
       {mode === "result" && translations.map((t, i) => (
-        <div key={i} className="translation-box" style={{
-          left: t.x, top: t.y, width: t.width, minHeight: t.height,
+        <div key={i} className="translation-box" title={t.translated} style={{
+          left: t.x, top: t.y, width: t.width, height: t.height,
           background: t.bgColor,
           color: t.textColor,
         }}>
