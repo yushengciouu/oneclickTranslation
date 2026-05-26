@@ -1,70 +1,33 @@
 ﻿use base64::{engine::general_purpose, Engine as _};
 use screenshots::Screen;
-use screenshots::image::{DynamicImage, GrayImage, ImageFormat};
+use screenshots::image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// 灰階 + Otsu 二值化 + 小圖放大，讓各種顏色文字都能被 OCR 辨識
+/// 小圖放大，讓 Windows OCR 對小選取範圍也有足夠解析度
+/// Windows OCR 本身支援彩色圖，不需要二值化
 /// 回傳 (PNG bytes, 放大倍率)，座標需除以倍率還原
 fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
-    let gray: GrayImage = img.to_luma8();
-
-    // Otsu 全域最佳閾值
-    let mut histogram = [0u32; 256];
-    for p in gray.pixels() {
-        histogram[p[0] as usize] += 1;
-    }
-    let total = (gray.width() * gray.height()) as u64;
-    let sum: u64 = histogram.iter().enumerate().map(|(i, &c)| i as u64 * c as u64).sum();
-    let (mut sum_b, mut w_b, mut best_var, mut threshold) = (0u64, 0u64, 0.0f64, 128u8);
-    for (i, &cnt) in histogram.iter().enumerate() {
-        w_b += cnt as u64;
-        if w_b == 0 { continue; }
-        let w_f = total - w_b;
-        if w_f == 0 { break; }
-        sum_b += i as u64 * cnt as u64;
-        let mb = sum_b as f64 / w_b as f64;
-        let mf = (sum - sum_b) as f64 / w_f as f64;
-        let var = w_b as f64 * w_f as f64 * (mb - mf).powi(2);
-        if var > best_var { best_var = var; threshold = i as u8; }
-    }
-
-    // 二值化：文字像素→黑(0)，背景→白(255)
-    let binary = GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
-        let v = gray.get_pixel(x, y)[0];
-        if v <= threshold { screenshots::image::Luma([0u8]) } else { screenshots::image::Luma([255u8]) }
-    });
-
-    // 檢查：若黑色像素 > 50% 則反轉（深色背景亮色文字）
-    let black_count = binary.pixels().filter(|p| p[0] == 0).count();
-    let should_invert = black_count * 2 > (gray.width() * gray.height()) as usize;
-    let final_img = if should_invert {
-        GrayImage::from_fn(binary.width(), binary.height(), |x, y| {
-            let v = binary.get_pixel(x, y)[0];
-            screenshots::image::Luma([255 - v])
-        })
-    } else {
-        binary
-    };
+    let (w, h) = (img.width(), img.height());
 
     // 圖片太小時放大（Windows OCR 對小圖辨識率差）
-    let (output_img, scale) = if final_img.height() < 80 || final_img.width() < 200 {
-        let s = 2.0f32.max(80.0 / final_img.height() as f32).min(4.0);
-        let nw = (final_img.width() as f32 * s) as u32;
-        let nh = (final_img.height() as f32 * s) as u32;
+    let (output_img, scale) = if h < 80 || w < 200 {
+        let s = (2.0f32).max(80.0 / h as f32).min(4.0);
+        let nw = (w as f32 * s) as u32;
+        let nh = (h as f32 * s) as u32;
         let up = screenshots::image::imageops::resize(
-            &final_img, nw, nh,
+            &img.to_rgba8(), nw, nh,
             screenshots::image::imageops::FilterType::Lanczos3,
         );
-        (up, s as f64)
+        (DynamicImage::ImageRgba8(up), s as f64)
     } else {
-        (final_img, 1.0f64)
+        (img, 1.0f64)
     };
 
     let mut buf = Cursor::new(Vec::new());
-    DynamicImage::ImageLuma8(output_img).write_to(&mut buf, ImageFormat::Png).unwrap_or(());
+    output_img.write_to(&mut buf, ImageFormat::Png).unwrap_or(());
     (buf.into_inner(), scale)
 }
 

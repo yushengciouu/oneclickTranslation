@@ -7,7 +7,7 @@ type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
 
 interface Rect { x: number; y: number; width: number; height: number; }
 
-interface VisionLine { original: string; translated: string; }
+interface OcrLine { text: string; x: number; y: number; width: number; height: number; }
 
 interface TranslationLine {
   original: string;
@@ -82,6 +82,7 @@ function App() {
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [translations, setTranslations] = useState<TranslationLine[]>([]);
+  const [resultSelection, setResultSelection] = useState<Rect | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const modeRef = useRef<AppMode>("idle");
@@ -96,6 +97,7 @@ function App() {
     setScreenshot(null);
     setSelection(null);
     setTranslations([]);
+    setResultSelection(null);
     setError(null);
   }, []);
 
@@ -144,43 +146,65 @@ function App() {
       const scaleY = imgEl.naturalHeight / window.innerHeight;
 
       // LLM 視覺不需要 padding，嚴格裁切選取範圍，避免翻譯到範圍外的文字
+      // Windows OCR 需要 padding 提升辨識率；裁切用原生像素座標
+      const PAD = 20;
+      const cssX = Math.max(0, activeSelection.x - PAD);
+      const cssY = Math.max(0, activeSelection.y - PAD);
+      const cssW = Math.min(window.innerWidth - cssX, activeSelection.width + PAD * 2);
+      const cssH = Math.min(window.innerHeight - cssY, activeSelection.height + PAD * 2);
       const nativeRect: Rect = {
-        x: Math.round(activeSelection.x * scaleX),
-        y: Math.round(activeSelection.y * scaleY),
-        width: Math.round(activeSelection.width * scaleX),
-        height: Math.round(activeSelection.height * scaleY),
+        x: Math.round(cssX * scaleX),
+        y: Math.round(cssY * scaleY),
+        width: Math.round(cssW * scaleX),
+        height: Math.round(cssH * scaleY),
       };
       const cropped = await cropImage(screenshot, nativeRect);
 
-      // 使用視覺語言模型一次完成 OCR + 翻譯
-      const visionLines = await invoke<VisionLine[]>("vision_ocr_translate", { imageBase64: cropped });
-      if (visionLines.length === 0) {
+      // Step 1：Windows OCR 取得每行文字與精確座標
+      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped });
+      if (ocrLines.length === 0) {
         setError("未辨識到任何文字");
         setMode("selecting");
         return;
       }
 
-      // 整個選取範圍用一個框覆蓋，不論 LLM 回傳幾行都不會重疊或超出
-      const allTranslated = visionLines.map(l => l.translated).join("\n");
-      const bgColor = sampleBgColor(
-        imgEl,
-        activeSelection.x * scaleX,
-        activeSelection.y * scaleY,
-        activeSelection.width * scaleX,
-        activeSelection.height * scaleY,
-      );
-      const result: TranslationLine[] = [{
-        original: visionLines.map(l => l.original).join("\n"),
-        translated: allTranslated,
-        x: activeSelection.x,
-        y: activeSelection.y,
-        width: activeSelection.width,
-        height: activeSelection.height,
-        bgColor,
-        textColor: contrastColor(bgColor),
-      }];
+      // Step 2：LLM 翻譯（品質比 Windows OCR 自帶翻譯好）
+      const texts = ocrLines.map(l => l.text);
+      const translated = await invoke<string[]>("translate_lines", { texts });
+
+      // Step 3：座標換算（OCR 回傳的是相對於 nativeRect 的原生像素）
+      //         換算回 CSS pixels，並 clamp 到原始選取範圍
+      const result: TranslationLine[] = ocrLines.map((line, i) => {
+        const fx = cssX + line.x / scaleX;
+        const fy = cssY + line.y / scaleY;
+        const fw = line.width / scaleX;
+        const fh = line.height / scaleY;
+
+        const clampX = Math.max(activeSelection.x, fx);
+        const clampY = Math.max(activeSelection.y, fy);
+        const clampW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - clampX;
+        const clampH = Math.min(activeSelection.y + activeSelection.height, fy + fh) - clampY;
+        if (clampW <= 2 || clampH <= 2) return null;
+
+        const bgColor = sampleBgColor(
+          imgEl,
+          activeSelection.x * scaleX, clampY * scaleY,
+          activeSelection.width * scaleX, Math.max(1, clampH * scaleY),
+        );
+        return {
+          original: line.text,
+          translated: translated[i] ?? "",
+          x: activeSelection.x,        // 固定用選取範圍左邊
+          y: clampY,
+          width: activeSelection.width, // 固定用選取範圍全寬，確保完整覆蓋原文
+          height: clampH,
+          bgColor,
+          textColor: contrastColor(bgColor),
+        };
+      }).filter((t): t is TranslationLine => t !== null);
 
       setTranslations(result);
+      setResultSelection(activeSelection);
       setMode("result");
     } catch (err) {
       setError(String(err));
@@ -234,15 +258,36 @@ function App() {
         <div className="selection-rect" style={{ left: selection.x, top: selection.y, width: selection.width, height: selection.height }} />
       )}
 
-      {mode === "result" && translations.map((t, i) => (
-        <div key={i} className="translation-box" title={t.translated} style={{
-          left: t.x, top: t.y, width: t.width, height: t.height,
-          background: t.bgColor,
-          color: t.textColor,
+      {mode === "result" && translations.length > 0 && resultSelection && (
+        // clipping container：嚴格限制在選取範圍，overflow hidden
+        <div style={{
+          position: "absolute",
+          left: resultSelection.x,
+          top: resultSelection.y,
+          width: resultSelection.width,
+          height: resultSelection.height,
+          overflow: "hidden",
+          pointerEvents: "none",
         }}>
-          {t.translated}
+          {translations.map((t, i) => {
+            // 每個框高度延伸到下一行起點，讓譯文有空間換行
+            const nextY = translations[i + 1]?.y ?? (resultSelection.y + resultSelection.height);
+            const boxH = nextY - t.y;
+            return (
+              <div key={i} className="translation-box" title={t.translated} style={{
+                left: 0,
+                top: t.y - resultSelection.y,
+                width: t.width,
+                height: boxH,
+                background: t.bgColor,
+                color: t.textColor,
+              }}>
+                {t.translated}
+              </div>
+            );
+          })}
         </div>
-      ))}
+      )}
 
       {mode === "selecting" && <div className="hint">拖曳選取翻譯範圍 · Esc 取消</div>}
 
