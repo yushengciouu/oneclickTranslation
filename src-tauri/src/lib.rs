@@ -175,12 +175,19 @@ async fn ocr_image(image_base64: String) -> Result<Vec<OcrLine>, String> {
 
 #[tauri::command]
 async fn translate_lines(texts: Vec<String>) -> Result<Vec<String>, String> {
-    let combined = texts.join("\n");
+    // 加入編號，要求 LLM 一定照原數對映回來
+    let n = texts.len();
+    let combined = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{}. {}", i + 1, t))
+        .collect::<Vec<_>>()
+        .join("\n");
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": "gemma-4:31B",
         "messages": [
-            { "role": "system", "content": "You are a translator. Translate the following Traditional Chinese text lines to English. Output ONLY the translated lines in the same order, one per line, no explanation." },
+            { "role": "system", "content": "You are a translator. Translate each numbered Traditional Chinese text item to English. Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. Same count as input. No extra lines, no explanations." },
             { "role": "user", "content": combined }
         ],
         "temperature": 0.1
@@ -196,11 +203,23 @@ async fn translate_lines(texts: Vec<String>) -> Result<Vec<String>, String> {
         .as_str()
         .ok_or("Invalid model response")?
         .to_string();
-    Ok(content
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
+
+    // 解析 "N. text" 格式，按編號填入對應位置
+    let mut result = vec![String::new(); n];
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(dot_pos) = trimmed.find(". ") {
+            let num_str = &trimmed[..dot_pos];
+            if num_str.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(num) = num_str.parse::<usize>() {
+                    if num >= 1 && num <= n {
+                        result[num - 1] = trimmed[dot_pos + 2..].trim().to_string();
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

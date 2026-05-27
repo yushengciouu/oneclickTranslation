@@ -180,28 +180,54 @@ function App() {
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;
 
-        const clampX = Math.max(activeSelection.x, fx);
-        const clampY = Math.max(activeSelection.y, fy);
-        const clampW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - clampX;
-        const clampH = Math.min(activeSelection.y + activeSelection.height, fy + fh) - clampY;
-        if (clampW <= 2 || clampH <= 2) return null;
+        // 跳過中心點不在選取範圍內的行（padding 帶進來的雜訊）
+        const centerX = fx + fw / 2;
+        const centerY = fy + fh / 2;
+        if (
+          centerX < activeSelection.x || centerX > activeSelection.x + activeSelection.width ||
+          centerY < activeSelection.y || centerY > activeSelection.y + activeSelection.height
+        ) return null;
+
+        // 跳過 LLM 沒有翻譯到的行（行數不對齊時）
+        if (!translated[i]?.trim()) return null;
+
+        // 保留原始 OCR x/width，譲表格不同欄不會隱响對方內容
+        const boxX = Math.max(activeSelection.x, fx);
+        const boxW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - boxX;
+        if (boxW <= 2) return null;
 
         const bgColor = sampleBgColor(
           imgEl,
-          activeSelection.x * scaleX, clampY * scaleY,
-          activeSelection.width * scaleX, Math.max(1, clampH * scaleY),
+          boxX * scaleX, fy * scaleY,
+          boxW * scaleX, Math.max(1, fh * scaleY),
         );
         return {
           original: line.text,
-          translated: translated[i] ?? "",
-          x: activeSelection.x,        // 固定用選取範圍左邊
-          y: clampY,
-          width: activeSelection.width, // 固定用選取範圍全寬，確保完整覆蓋原文
-          height: clampH,
+          translated: translated[i],
+          x: boxX,
+          y: fy,
+          width: boxW,
+          height: fh,
           bgColor,
           textColor: contrastColor(bgColor),
         };
       }).filter((t): t is TranslationLine => t !== null);
+
+      // 按 (y, x) 排序，然後將每個框的寬度延伸到同一行下一個框的左邊
+      // 避免短中文字（架構/訓練目標）的翻譯框太窄導致英文換行亂碼
+      result.sort((a, b) => Math.abs(a.y - b.y) < 8 ? a.x - b.x : a.y - b.y);
+      const ROW_THRESHOLD = 24; // 同一行的 y 差距容忍值（px）
+      for (let i = 0; i < result.length; i++) {
+        const selRight = activeSelection.x + activeSelection.width;
+        let rightBound = selRight;
+        for (let j = i + 1; j < result.length; j++) {
+          if (Math.abs(result[j].y - result[i].y) <= ROW_THRESHOLD && result[j].x > result[i].x) {
+            rightBound = Math.min(result[j].x - 2, selRight);
+            break;
+          }
+        }
+        result[i].width = Math.max(result[i].width, rightBound - result[i].x);
+      }
 
       setTranslations(result);
       setResultSelection(activeSelection);
@@ -270,15 +296,12 @@ function App() {
           pointerEvents: "none",
         }}>
           {translations.map((t, i) => {
-            // 每個框高度延伸到下一行起點，讓譯文有空間換行
-            const nextY = translations[i + 1]?.y ?? (resultSelection.y + resultSelection.height);
-            const boxH = nextY - t.y;
             return (
               <div key={i} className="translation-box" title={t.translated} style={{
-                left: 0,
+                left: t.x - resultSelection.x,
                 top: t.y - resultSelection.y,
                 width: t.width,
-                height: boxH,
+                minHeight: t.height,
                 background: t.bgColor,
                 color: t.textColor,
               }}>
