@@ -4,6 +4,34 @@ import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
+type Lang = "zh" | "en";
+
+const LOCALE = {
+  zh: {
+    title: "Screen Translator",
+    subtitle: "按 Ctrl+Shift+T 或點按鈕開始截圖翻譯",
+    startBtn: "開始截圖",
+    hint: "拖曳選取翻譯範圍· Esc 取消",
+    processing: "OCR 辨識中...",
+    reselect: "重新選取",
+    close: "關閉",
+    translate: "翻譯",
+    noText: "未辨識到任何文字",
+    langToggle: "EN",
+  },
+  en: {
+    title: "Screen Translator",
+    subtitle: "Press Ctrl+Shift+T or click the button to start",
+    startBtn: "Start Capture",
+    hint: "Drag to select area \u00b7 Esc to cancel",
+    processing: "Recognizing...",
+    reselect: "Reselect",
+    close: "Close",
+    translate: "Translate",
+    noText: "No text recognized",
+    langToggle: "\u4e2d",
+  },
+} as const;
 
 interface Rect { x: number; y: number; width: number; height: number; }
 
@@ -79,6 +107,8 @@ function cropImage(src: string, rect: Rect): Promise<string> {
 
 function App() {
   const [mode, setMode] = useState<AppMode>("idle");
+  const [lang, setLang] = useState<Lang>("zh");
+  const t = LOCALE[lang];
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [translations, setTranslations] = useState<TranslationLine[]>([]);
@@ -267,9 +297,10 @@ function App() {
   if (mode === "idle") {
     return (
       <main className="idle-ui">
-        <h2>Screen Translator</h2>
-        <p>按 <kbd>Ctrl+Shift+T</kbd> 或點按鈕開始截圖翻譯</p>
-        <button onClick={handleToggle}>開始截圖</button>
+        <button className="lang-toggle" onClick={() => setLang(l => l === "zh" ? "en" : "zh")}>{t.langToggle}</button>
+        <h2>{t.title}</h2>
+        <p>{t.subtitle}</p>
+        <button onClick={handleToggle}>{t.startBtn}</button>
       </main>
     );
   }
@@ -312,12 +343,12 @@ function App() {
         </div>
       )}
 
-      {mode === "selecting" && <div className="hint">拖曳選取翻譯範圍 · Esc 取消</div>}
+      {mode === "selecting" && <div className="hint">{t.hint}</div>}
 
       {mode === "processing" && (
         <div className="processing-overlay">
           <div className="spinner" />
-          <span>OCR 辨識中...</span>
+          <span>{t.processing}</span>
         </div>
       )}
 
@@ -330,14 +361,14 @@ function App() {
           )}
           {mode === "selected" && (
             <>
-              <button className="btn-secondary" onClick={() => setMode("selecting")}>重新選取</button>
-              <button className="btn-primary" onClick={() => handleTranslate()}>翻譯</button>
+              <button className="btn-secondary" onClick={() => setMode("selecting")}>{t.reselect}</button>
+              <button className="btn-primary" onClick={() => handleTranslate()}>{t.translate}</button>
             </>
           )}
           {mode === "result" && (
-            <button className="btn-secondary" onClick={() => { setTranslations([]); setSelection(null); setMode("selecting"); }}>重新選取</button>
+            <button className="btn-secondary" onClick={() => { setTranslations([]); setSelection(null); setMode("selecting"); }}>{t.reselect}</button>
           )}
-          <button className="btn-danger" onClick={resetToIdle}>關閉</button>
+          <button className="btn-danger" onClick={resetToIdle}>{t.close}</button>
         </div>
       )}
     </div>

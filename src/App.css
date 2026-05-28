@@ -63,6 +63,25 @@ body {
   background: #3a7ae0;
 }
 
+.lang-toggle {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  padding: 4px 12px !important;
+  font-size: 0.8rem !important;
+  background: #333 !important;
+  color: #ccc !important;
+  border: 1px solid #555 !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.lang-toggle:hover {
+  background: #555 !important;
+  color: #fff !important;
+}
+
 /* ── Overlay 截圖模式 ── */
 .overlay {
   position: fixed;
