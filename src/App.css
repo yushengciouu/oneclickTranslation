@@ -82,6 +82,33 @@ body {
   color: #fff !important;
 }
 
+.dir-switch {
+  display: flex;
+  gap: 8px;
+}
+
+.dir-btn {
+  padding: 6px 18px !important;
+  font-size: 0.9rem !important;
+  background: #2a2a3e !important;
+  color: #aaa !important;
+  border: 1px solid #444 !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.dir-btn.active {
+  background: #4f8ef7 !important;
+  color: #fff !important;
+  border-color: #4f8ef7 !important;
+}
+
+.dir-btn:hover:not(.active) {
+  background: #3a3a55 !important;
+  color: #ddd !important;
+}
+
 /* ── Overlay 截圖模式 ── */
 .overlay {
   position: fixed;

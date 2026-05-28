@@ -64,7 +64,7 @@ async fn start_capture(window: tauri::WebviewWindow) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn ocr_image(image_base64: String) -> Result<Vec<OcrLine>, String> {
+async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine>, String> {
     let data_str = image_base64
         .strip_prefix("data:image/png;base64,")
         .unwrap_or(&image_base64)
@@ -123,7 +123,7 @@ async fn ocr_image(image_base64: String) -> Result<Vec<OcrLine>, String> {
             .map_err(|e| e.to_string())?;
 
         let language =
-            Language::CreateLanguage(&HSTRING::from("zh-Hant")).map_err(|e| e.to_string())?;
+            Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;;
         let engine =
             OcrEngine::TryCreateFromLanguage(&language).map_err(|e| e.to_string())?;
 
@@ -174,20 +174,31 @@ async fn ocr_image(image_base64: String) -> Result<Vec<OcrLine>, String> {
 }
 
 #[tauri::command]
-async fn translate_lines(texts: Vec<String>) -> Result<Vec<String>, String> {
+async fn translate_lines(texts: Vec<String>, target_lang: String) -> Result<Vec<String>, String> {
     // 加入編號，要求 LLM 一定照原數對映回來
     let n = texts.len();
+    let (src_desc, tgt_desc) = if target_lang == "zh" {
+        ("English", "Traditional Chinese (繁體中文)")
+    } else {
+        ("Traditional Chinese", "English")
+    };
     let combined = texts
         .iter()
         .enumerate()
         .map(|(i, t)| format!("{}. {}", i + 1, t))
         .collect::<Vec<_>>()
         .join("\n");
+    let system_prompt = format!(
+        "You are a translator. Translate each numbered {} text item to {}. \
+         Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. \
+         Same count as input. No extra lines, no explanations.",
+        src_desc, tgt_desc
+    );
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": "gemma-4:31B",
         "messages": [
-            { "role": "system", "content": "You are a translator. Translate each numbered Traditional Chinese text item to English. Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. Same count as input. No extra lines, no explanations." },
+            { "role": "system", "content": system_prompt },
             { "role": "user", "content": combined }
         ],
         "temperature": 0.1

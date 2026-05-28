@@ -5,6 +5,9 @@ import "./App.css";
 
 type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
 type Lang = "zh" | "en";
+type TransDir = "zh-en" | "en-zh";
+
+const DIR_LABEL: Record<TransDir, string> = { "zh-en": "中→英", "en-zh": "英→中" };
 
 const LOCALE = {
   zh: {
@@ -108,6 +111,7 @@ function cropImage(src: string, rect: Rect): Promise<string> {
 function App() {
   const [mode, setMode] = useState<AppMode>("idle");
   const [lang, setLang] = useState<Lang>("zh");
+  const [transDir, setTransDir] = useState<TransDir>("zh-en");
   const t = LOCALE[lang];
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
@@ -191,16 +195,18 @@ function App() {
       const cropped = await cropImage(screenshot, nativeRect);
 
       // Step 1：Windows OCR 取得每行文字與精確座標
-      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped });
+      const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
+      const targetLang = transDir === "zh-en" ? "en" : "zh";
+      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang });
       if (ocrLines.length === 0) {
-        setError("未辨識到任何文字");
+        setError(t.noText);
         setMode("selecting");
         return;
       }
 
       // Step 2：LLM 翻譯（品質比 Windows OCR 自帶翻譯好）
       const texts = ocrLines.map(l => l.text);
-      const translated = await invoke<string[]>("translate_lines", { texts });
+      const translated = await invoke<string[]>("translate_lines", { texts, targetLang });
 
       // Step 3：座標換算（OCR 回傳的是相對於 nativeRect 的原生像素）
       //         換算回 CSS pixels，並 clamp 到原始選取範圍
@@ -266,7 +272,7 @@ function App() {
       setError(String(err));
       setMode("selecting");
     }
-  }, [screenshot, selection]);
+  }, [screenshot, selection, transDir, lang]);
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (modeRef.current !== "selecting") return;
@@ -300,6 +306,18 @@ function App() {
         <button className="lang-toggle" onClick={() => setLang(l => l === "zh" ? "en" : "zh")}>{t.langToggle}</button>
         <h2>{t.title}</h2>
         <p>{t.subtitle}</p>
+        <div className="dir-switch">
+          <button
+            className={transDir === "zh-en" ? "dir-btn active" : "dir-btn"}
+            onClick={() => setTransDir("zh-en")}>
+            {DIR_LABEL["zh-en"]}
+          </button>
+          <button
+            className={transDir === "en-zh" ? "dir-btn active" : "dir-btn"}
+            onClick={() => setTransDir("en-zh")}>
+            {DIR_LABEL["en-zh"]}
+          </button>
+        </div>
         <button onClick={handleToggle}>{t.startBtn}</button>
       </main>
     );
