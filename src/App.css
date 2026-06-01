@@ -82,6 +82,84 @@ body {
   color: #fff !important;
 }
 
+.settings-btn {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  padding: 4px 10px !important;
+  font-size: 1rem !important;
+  background: #333 !important;
+  color: #ccc !important;
+  border: 1px solid #555 !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.settings-btn:hover {
+  background: #555 !important;
+  color: #fff !important;
+}
+
+/* ── Settings Modal ── */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.settings-modal {
+  background: #1e1e2e;
+  border: 1px solid #444;
+  border-radius: 12px;
+  padding: 28px 32px;
+  min-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: #e0e0e0;
+}
+
+.settings-modal h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.settings-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: #aaa;
+}
+
+.settings-modal input {
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #555;
+  background: #2a2a3e;
+  color: #e0e0e0;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.settings-modal input:focus {
+  border-color: #4f8ef7;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
 .dir-switch {
   display: flex;
   gap: 8px;

@@ -174,7 +174,7 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
 }
 
 #[tauri::command]
-async fn translate_lines(texts: Vec<String>, target_lang: String) -> Result<Vec<String>, String> {
+async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: String, model: String) -> Result<Vec<String>, String> {
     // 加入編號，要求 LLM 一定照原數對映回來
     let n = texts.len();
     let (src_desc, tgt_desc) = if target_lang == "zh" {
@@ -196,15 +196,20 @@ async fn translate_lines(texts: Vec<String>, target_lang: String) -> Result<Vec<
     );
     let client = reqwest::Client::new();
     let body = serde_json::json!({
-        "model": "gemma-4:31B",
+        "model": model,
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": combined }
         ],
         "temperature": 0.1
     });
+    let endpoint = if api_url.ends_with("/v1/chat/completions") {
+        api_url.clone()
+    } else {
+        format!("{}/v1/chat/completions", api_url.trim_end_matches('/'))
+    };
     let resp = client
-        .post("http://192.168.39.143:8001/v1/chat/completions")
+        .post(&endpoint)
         .json(&body)
         .send()
         .await
@@ -248,7 +253,7 @@ struct VisionLine {
 
 /// 用視覺語言模型一次完成 OCR + 翻譯，回傳每行原文與譯文
 #[tauri::command]
-async fn vision_ocr_translate(image_base64: String) -> Result<Vec<VisionLine>, String> {
+async fn vision_ocr_translate(image_base64: String, api_url: String, model: String) -> Result<Vec<VisionLine>, String> {
     // 去掉 data URL 前綴（"data:image/png;base64,"）
     let b64 = if let Some(idx) = image_base64.find(',') {
         image_base64[idx + 1..].to_string()
@@ -258,7 +263,7 @@ async fn vision_ocr_translate(image_base64: String) -> Result<Vec<VisionLine>, S
 
     let client = reqwest::Client::new();
     let body = serde_json::json!({
-        "model": "gemma-4:31B",
+        "model": model,
         "messages": [{
             "role": "user",
             "content": [
@@ -276,8 +281,13 @@ async fn vision_ocr_translate(image_base64: String) -> Result<Vec<VisionLine>, S
         "temperature": 0.1
     });
 
+    let endpoint = if api_url.ends_with("/v1/chat/completions") {
+        api_url.clone()
+    } else {
+        format!("{}/v1/chat/completions", api_url.trim_end_matches('/'))
+    };
     let resp = client
-        .post("http://192.168.39.143:8001/v1/chat/completions")
+        .post(&endpoint)
         .json(&body)
         .send()
         .await

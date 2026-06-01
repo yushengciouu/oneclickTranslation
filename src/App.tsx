@@ -7,6 +7,29 @@ type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
 type Lang = "zh" | "en";
 type TransDir = "zh-en" | "en-zh";
 
+const SETTINGS_KEY = "screen-translator-settings";
+const DEFAULT_SETTINGS = {
+  apiUrl: "http://192.168.39.143:8001",
+  model: "gemma-4:31B",
+};
+
+interface AppSettings {
+  apiUrl: string;
+  model: string;
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch { /* ignore */ }
+  return { ...DEFAULT_SETTINGS };
+}
+
+function saveSettings(s: AppSettings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+
 const DIR_LABEL: Record<TransDir, string> = { "zh-en": "中→英", "en-zh": "英→中" };
 
 const LOCALE = {
@@ -118,6 +141,9 @@ function App() {
   const [translations, setTranslations] = useState<TranslationLine[]>([]);
   const [resultSelection, setResultSelection] = useState<Rect | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(loadSettings);
 
   const modeRef = useRef<AppMode>("idle");
   const isDragging = useRef(false);
@@ -206,7 +232,12 @@ function App() {
 
       // Step 2：LLM 翻譯（品質比 Windows OCR 自帶翻譯好）
       const texts = ocrLines.map(l => l.text);
-      const translated = await invoke<string[]>("translate_lines", { texts, targetLang });
+      const translated = await invoke<string[]>("translate_lines", {
+        texts,
+        targetLang,
+        apiUrl: settings.apiUrl,
+        model: settings.model,
+      });
 
       // Step 3：座標換算（OCR 回傳的是相對於 nativeRect 的原生像素）
       //         換算回 CSS pixels，並 clamp 到原始選取範圍
@@ -304,6 +335,7 @@ function App() {
     return (
       <main className="idle-ui">
         <button className="lang-toggle" onClick={() => setLang(l => l === "zh" ? "en" : "zh")}>{t.langToggle}</button>
+        <button className="settings-btn" onClick={() => { setDraftSettings({ ...settings }); setShowSettings(true); }}>⚙</button>
         <h2>{t.title}</h2>
         <p>{t.subtitle}</p>
         <div className="dir-switch">
@@ -319,6 +351,42 @@ function App() {
           </button>
         </div>
         <button onClick={handleToggle}>{t.startBtn}</button>
+
+        {showSettings && (
+          <div className="settings-overlay" onClick={() => setShowSettings(false)}>
+            <div className="settings-modal" onClick={e => e.stopPropagation()}>
+              <h3>設定 / Settings</h3>
+              <label>
+                API URL
+                <input
+                  type="text"
+                  value={draftSettings.apiUrl}
+                  onChange={e => setDraftSettings(s => ({ ...s, apiUrl: e.target.value }))}
+                  placeholder="http://192.168.x.x:8001"
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                Model
+                <input
+                  type="text"
+                  value={draftSettings.model}
+                  onChange={e => setDraftSettings(s => ({ ...s, model: e.target.value }))}
+                  placeholder="gemma-4:31B"
+                  spellCheck={false}
+                />
+              </label>
+              <div className="settings-actions">
+                <button className="btn-secondary" onClick={() => setShowSettings(false)}>取消</button>
+                <button className="btn-primary" onClick={() => {
+                  saveSettings(draftSettings);
+                  setSettings(draftSettings);
+                  setShowSettings(false);
+                }}>儲存</button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     );
   }
