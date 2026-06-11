@@ -136,6 +136,36 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
   return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
 }
 
+// 根據文字長度、寬度、高度，動態計算最適合的字型大小，確保在不重疊的前提下字型清晰可讀
+function getAutoFontSize(text: string, width: number, height: number): string {
+  if (!text) return "11px";
+  let len = 0;
+  for (let i = 0; i < text.length; i++) {
+    len += text.charCodeAt(i) > 127 ? 2 : 1; // 英文算 1，非英文算 2
+  }
+  
+  const charWidth = 6.2; // 預設 11px 字體下，半形字元在畫面上所佔大概寬度
+  const totalExpectedWidth = len * charWidth;
+  
+  if (totalExpectedWidth > width) {
+    if (height < 25) {
+      // 單行純文字框：縮小字體以維持單行不折行溢出（行高很矮，設定下界為 9.5px 避免字型過小）
+      const scaled = (width / len) / 0.55; 
+      return `${Math.max(9.5, Math.min(11, scaled)).toFixed(1)}px`;
+    } else {
+      // 多行區塊：如果預期總面積大於實際可用面積，依比例調小字體
+      const area = width * height;
+      const requiredAreaAt11 = totalExpectedWidth * 13;
+      if (requiredAreaAt11 > area) {
+        const ratio = Math.sqrt(area / requiredAreaAt11);
+        // 設定下界為 9.5px，確保字型清晰可讀不傷眼
+        return `${Math.max(9.5, Math.min(11, 11 * ratio)).toFixed(1)}px`;
+      }
+    }
+  }
+  return "11px";
+}
+
 // 根據背景亮度選擇黑或白文字
 function contrastColor(bg: string): string {
   const m = bg.match(/\d+/g);
@@ -313,27 +343,7 @@ function App() {
         result[i].width = Math.max(result[i].width, rightBound - result[i].x);
       }
 
-      // 排版防重疊優化：自上而下偵測，若相鄰兩行垂直距離（Y 軸）過近（例如重疊或太擠），
-      // 將下方的框往下移動，使其不重疊，維持閱讀空間。
-      result.sort((a, b) => a.y - b.y); // 按 Y 座標由上而下嚴格排序
-      for (let i = 0; i < result.length; i++) {
-        for (let j = i + 1; j < result.length; j++) {
-          const boxA = result[i];
-          const boxB = result[j];
-          
-          // 檢查水平是否有交集（X 軸重疊）
-          const horizontalOverlap = !(boxA.x + boxA.width <= boxB.x || boxB.x + boxB.width <= boxA.x);
-          
-          if (horizontalOverlap) {
-            // 如果 B 框頂端高於 A 框底端（或兩者相距小於 3 像素安全距離）
-            const minGap = 3;
-            if (boxB.y < boxA.y + boxA.height + minGap) {
-              // 將 B 框垂直位移推開
-              boxB.y = boxA.y + boxA.height + minGap;
-            }
-          }
-        }
-      }
+      setTranslations(result);
 
       setTranslations(result);
       setResultSelection(activeSelection);
@@ -496,12 +506,16 @@ function App() {
           pointerEvents: "none",
         }}>
           {translations.map((t, i) => {
+            const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height);
+            // 加上上下左右少許 padding/margin 偏移與尺寸膨脹補貼，確保完美蓋住原文
+            const paddingOffset = 1.5; 
             return (
               <div key={i} className="translation-box" title={t.translated} style={{
-                left: t.x - resultSelection.x,
-                top: t.y - resultSelection.y,
-                width: t.width,
-                minHeight: t.height,
+                left: t.x - resultSelection.x - paddingOffset,
+                top: t.y - resultSelection.y - paddingOffset,
+                width: t.width + paddingOffset * 2,
+                minHeight: t.height + paddingOffset * 2, // 既設 minHeight 避免單詞折行蓋不住，又限制高度差
+                fontSize: dynamicFontSize,
                 background: t.bgColor,
                 color: t.textColor,
               }}>
