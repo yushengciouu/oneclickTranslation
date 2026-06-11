@@ -37,7 +37,8 @@ const LOCALE = {
     title: "Screen Translator",
     subtitle: "按 Ctrl+Shift+T 或點按鈕開始截圖翻譯",
     startBtn: "開始截圖",
-    hint: "拖曳選取翻譯範圍· Esc 取消",
+    fullScreenBtn: "一鍵全頁翻譯",
+    hint: "拖曳選取範圍 · 按空白鍵全頁翻譯 · Esc 取消",
     processing: "OCR 辨識中...",
     reselect: "重新選取",
     close: "關閉",
@@ -49,7 +50,8 @@ const LOCALE = {
     title: "Screen Translator",
     subtitle: "Press Ctrl+Shift+T or click the button to start",
     startBtn: "Start Capture",
-    hint: "Drag to select area \u00b7 Esc to cancel",
+    fullScreenBtn: "Full Page Translate",
+    hint: "Drag to select \u00b7 Space for full page \u00b7 Esc to cancel",
     processing: "Recognizing...",
     reselect: "Reselect",
     close: "Close",
@@ -202,23 +204,10 @@ function App() {
     }
   }, [resetToIdle]);
 
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    listen("toggle-capture", handleToggle).then((fn) => { cleanup = fn; });
-    return () => cleanup?.();
-  }, [handleToggle]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && modeRef.current !== "idle") resetToIdle();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [resetToIdle]);
-
-  const handleTranslate = useCallback(async (overrideSel?: Rect) => {
+  const handleTranslate = useCallback(async (overrideSel?: Rect, overrideScreenshot?: string) => {
     const activeSelection = overrideSel ?? selection;
-    if (!screenshot || !activeSelection) return;
+    const activeScreenshot = overrideScreenshot ?? screenshot;
+    if (!activeScreenshot || !activeSelection) return;
     setMode("processing");
     setError(null);
     try {
@@ -227,7 +216,7 @@ function App() {
         const el = new Image();
         el.onload = () => resolve(el);
         el.onerror = reject;
-        el.src = screenshot!;
+        el.src = activeScreenshot;
       });
       // 原生像素 / CSS 像素（HiDPI 時可能是 1.25、1.5、2.0 等）
       const scaleX = imgEl.naturalWidth / window.innerWidth;
@@ -246,7 +235,7 @@ function App() {
         width: Math.round(cssW * scaleX),
         height: Math.round(cssH * scaleY),
       };
-      const cropped = await cropImage(screenshot, nativeRect);
+      const cropped = await cropImage(activeScreenshot, nativeRect);
 
       // Step 1：Windows OCR 取得每行文字與精確座標
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
@@ -324,6 +313,28 @@ function App() {
         result[i].width = Math.max(result[i].width, rightBound - result[i].x);
       }
 
+      // 排版防重疊優化：自上而下偵測，若相鄰兩行垂直距離（Y 軸）過近（例如重疊或太擠），
+      // 將下方的框往下移動，使其不重疊，維持閱讀空間。
+      result.sort((a, b) => a.y - b.y); // 按 Y 座標由上而下嚴格排序
+      for (let i = 0; i < result.length; i++) {
+        for (let j = i + 1; j < result.length; j++) {
+          const boxA = result[i];
+          const boxB = result[j];
+          
+          // 檢查水平是否有交集（X 軸重疊）
+          const horizontalOverlap = !(boxA.x + boxA.width <= boxB.x || boxB.x + boxB.width <= boxA.x);
+          
+          if (horizontalOverlap) {
+            // 如果 B 框頂端高於 A 框底端（或兩者相距小於 3 像素安全距離）
+            const minGap = 3;
+            if (boxB.y < boxA.y + boxA.height + minGap) {
+              // 將 B 框垂直位移推開
+              boxB.y = boxA.y + boxA.height + minGap;
+            }
+          }
+        }
+      }
+
       setTranslations(result);
       setResultSelection(activeSelection);
       setMode("result");
@@ -332,6 +343,47 @@ function App() {
       setMode("selecting");
     }
   }, [screenshot, selection, transDir, lang]);
+
+  const handleFullScreenTranslate = useCallback(async () => {
+    setError(null);
+    try {
+      let img = screenshot;
+      if (!img) {
+        img = await invoke<string>("start_capture");
+        setScreenshot(img);
+      }
+      const fullRect: Rect = {
+        x: 0,
+        y: 0,
+        width: window.innerWidth,
+        height: window.innerHeight,
+      };
+      setSelection(fullRect);
+      await handleTranslate(fullRect, img);
+    } catch (err) {
+      console.error("全頁翻譯失敗:", err);
+      setError(String(err));
+    }
+  }, [screenshot, handleTranslate]);
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    listen("toggle-capture", handleToggle).then((fn) => { cleanup = fn; });
+    return () => cleanup?.();
+  }, [handleToggle]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && modeRef.current !== "idle") {
+        resetToIdle();
+      } else if (e.key === " " && modeRef.current === "selecting") {
+        e.preventDefault();
+        handleFullScreenTranslate();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [resetToIdle, handleFullScreenTranslate]);
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (modeRef.current !== "selecting") return;
@@ -378,7 +430,10 @@ function App() {
             {DIR_LABEL["en-zh"]}
           </button>
         </div>
-        <button onClick={handleToggle}>{t.startBtn}</button>
+        <div style={{ display: "flex", gap: "12px" }}>
+          <button onClick={handleToggle}>{t.startBtn}</button>
+          <button onClick={handleFullScreenTranslate} style={{ backgroundColor: "#2ecc71" }}>{t.fullScreenBtn}</button>
+        </div>
 
         {showSettings && (
           <div className="settings-overlay" onClick={() => setShowSettings(false)}>
