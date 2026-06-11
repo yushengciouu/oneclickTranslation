@@ -252,18 +252,14 @@ function App() {
       const scaleX = imgEl.naturalWidth / window.innerWidth;
       const scaleY = imgEl.naturalHeight / window.innerHeight;
 
-      // LLM 視覺不需要 padding，嚴格裁切選取範圍，避免翻譯到範圍外的文字
-      // Windows OCR 需要 padding 提升辨識率；裁切用原生像素座標
-      const PAD = 20;
-      const cssX = Math.max(0, activeSelection.x - PAD);
-      const cssY = Math.max(0, activeSelection.y - PAD);
-      const cssW = Math.min(window.innerWidth - cssX, activeSelection.width + PAD * 2);
-      const cssH = Math.min(window.innerHeight - cssY, activeSelection.height + PAD * 2);
+      // 絕不使用會隨邊界裁截而導致座標平移失真（防偏移痛點）的額外 Padding。
+      // 當選取框貼近螢幕 0,0 邊界時，防 Padding 的裁切位置會發生非線性偏移。
+      // 這裡直接對齊 activeSelection 進行嚴格裁切，徹底根除偏位問題。
       const nativeRect: Rect = {
-        x: Math.round(cssX * scaleX),
-        y: Math.round(cssY * scaleY),
-        width: Math.round(cssW * scaleX),
-        height: Math.round(cssH * scaleY),
+        x: Math.round(activeSelection.x * scaleX),
+        y: Math.round(activeSelection.y * scaleY),
+        width: Math.round(activeSelection.width * scaleX),
+        height: Math.round(activeSelection.height * scaleY),
       };
       const cropped = await cropImage(activeScreenshot, nativeRect);
 
@@ -286,15 +282,16 @@ function App() {
         model: settings.model,
       });
 
-      // Step 3：座標換算（OCR 回傳的是相對於 nativeRect 的原生像素）
-      //         換算回 CSS pixels，並 clamp 到原始選取範圍
+      // Step 3：座標換算（OCR 回傳的是相對於 cropped 裁切圖片的原生像素）
+      //         因為裁切使用了絕對對齊的 activeSelection（無 Pad 偏移），
+      //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
       const result: TranslationLine[] = ocrLines.map((line, i) => {
-        const fx = cssX + line.x / scaleX;
-        const fy = cssY + line.y / scaleY;
+        const fx = activeSelection.x + line.x / scaleX;
+        const fy = activeSelection.y + line.y / scaleY;
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;
 
-        // 跳過中心點不在選取範圍內的行（padding 帶進來的雜訊）
+        // 跳過中心點不在選取範圍內的行（安全過濾）
         const centerX = fx + fw / 2;
         const centerY = fy + fh / 2;
         if (
@@ -342,8 +339,6 @@ function App() {
         }
         result[i].width = Math.max(result[i].width, rightBound - result[i].x);
       }
-
-      setTranslations(result);
 
       setTranslations(result);
       setResultSelection(activeSelection);
