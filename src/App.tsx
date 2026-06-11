@@ -83,27 +83,55 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
   if (!ctx) return "#ffffff";
   ctx.drawImage(img, 0, 0);
 
-  const border = Math.max(3, Math.round(Math.min(w, h) * 0.12));
-  const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+  // 定義邊框寬度，不宜太大以免踩到文字本身
+  const border = Math.max(1, Math.round(Math.min(w, h) * 0.08));
+  const clamp = (v: number, max: number) => Math.max(0, Math.min(Math.round(v), max));
   const W = img.naturalWidth, H = img.naturalHeight;
 
+  // 取得四個邊緣的取樣區域
   const regions = [
-    [clamp(x, W), clamp(y, H), clamp(w, W - x), border],
-    [clamp(x, W), clamp(y + h - border, H), clamp(w, W - x), border],
-    [clamp(x, W), clamp(y, H), border, clamp(h, H - y)],
-    [clamp(x + w - border, W), clamp(y, H), border, clamp(h, H - y)],
+    [clamp(x + border, W), clamp(y, H), clamp(w - 2 * border, W - (x + border)), border], // 頂部（微縮，避開角隅）
+    [clamp(x + border, W), clamp(y + h - border, H), clamp(w - 2 * border, W - (x + border)), border], // 底部（微縮，避開角隅）
+    [clamp(x, W), clamp(y + border, H), border, clamp(h - 2 * border, H - (y + border))], // 左側（微縮，避開角隅）
+    [clamp(x + w - border, W), clamp(y + border, H), border, clamp(h - 2 * border, H - (y + border))], // 右側（微縮，避開角隅）
   ] as [number, number, number, number][];
 
-  let r = 0, g = 0, b = 0, count = 0;
+  // 1. 收集所有取樣區域的 R, G, B 與對應的亮度 (Luminance)
+  const colors: { r: number; g: number; b: number; lum: number }[] = [];
+  
   for (const [sx, sy, sw, sh] of regions) {
     if (sw <= 0 || sh <= 0) continue;
     const d = ctx.getImageData(sx, sy, sw, sh).data;
     for (let i = 0; i < d.length; i += 4) {
-      r += d[i]; g += d[i + 1]; b += d[i + 2]; count++;
+      const r = d[i];
+      const g = d[i + 1];
+      const b = d[i + 2];
+      // 標準相對亮度公式
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      colors.push({ r, g, b, lum });
     }
   }
+
+  if (colors.length === 0) return "#ffffff";
+
+  // 2. 排序並過濾掉極端值（中位數濾波）：排除掉可能碰到底層文字、外框線等高/低亮度雜訊
+  colors.sort((a, b) => a.lum - b.lum);
+
+  // 捨棄最低 25% 與最高 25% 的極端像素，只取中間 50% 像素
+  const startIndex = Math.floor(colors.length * 0.25);
+  const endIndex = Math.ceil(colors.length * 0.75);
+  const validColors = colors.slice(startIndex, endIndex);
+
+  let rSum = 0, gSum = 0, bSum = 0, count = 0;
+  for (const c of validColors) {
+    rSum += c.r;
+    gSum += c.g;
+    bSum += c.b;
+    count++;
+  }
+
   if (count === 0) return "#ffffff";
-  return `rgb(${Math.round(r/count)},${Math.round(g/count)},${Math.round(b/count)})`;
+  return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
 }
 
 // 根據背景亮度選擇黑或白文字
