@@ -221,11 +221,14 @@ function App() {
     setError(null);
   }, []);
 
-  const handleToggle = useCallback(async () => {
+  const handleToggle = useCallback(async (event?: any) => {
     if (modeRef.current !== "idle") { resetToIdle(); return; }
     setError(null);
     try {
-      const img = await invoke<string>("start_capture");
+      let img = event?.payload as string | undefined | null;
+      if (!img) {
+        img = await invoke<string>("start_capture");
+      }
       setScreenshot(img);
       setSelection(null);
       setMode("selecting");
@@ -437,7 +440,9 @@ function App() {
         </div>
         <div style={{ display: "flex", gap: "12px" }}>
           <button onClick={handleToggle}>{t.startBtn}</button>
+          {/* 暫時隱藏一鍵全頁翻譯按鈕，保留底層邏輯與空白捷徑功能
           <button onClick={handleFullScreenTranslate} style={{ backgroundColor: "#2ecc71" }}>{t.fullScreenBtn}</button>
+          */}
         </div>
 
         {showSettings && (

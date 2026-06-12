@@ -53,6 +53,16 @@ npm run tauri dev
 npm run tauri build
 ```
 
+---
+
+## 💡 一鍵全頁翻譯預留功能說明（暫未啟用）
+
+專案已內建「一鍵全頁翻譯」核心功能，不論是底層坐標對齊還是 API 處理管道均已完備：
+* **前端按鈕**：目前已被標記隱藏，若日後需要手動開啟，請至 [src/App.tsx](src/App.tsx) 主畫面結構中取消註解 `<button onClick={handleFullScreenTranslate}...>`。
+* **快捷小秘訣**：當按下首頁 `開始截圖` 進入透明選取畫面時，您可以隨時直接按下 **`空白鍵 (Space)`**，這依然會觸發一鍵全頁翻譯，為您免去拉取全螢幕選框的步驟。
+
+---
+
 ## 推薦開發工具
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
