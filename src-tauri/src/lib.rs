@@ -316,7 +316,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+            use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton};
             use tauri::menu::{Menu, MenuItem};
 
             // 建立系統聯絡功能選單 (System Tray Menu)
@@ -350,12 +350,16 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button_state: _, .. } = event {
-                        let app_handle = tray.app_handle();
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                    if let TrayIconEvent::Click { button, .. } = event {
+                        if button == MouseButton::Left {
+                            let app_handle = tray.app_handle();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                // 當用戶左鍵單擊托盤圖示時，一律直接強制「還原並開啟介面」
+                                // 完全避免做顯示、隱藏的反向切換，徹底根治快速雙擊或多重事件造成的閃退隱藏問題
+                                let _ = window.unminimize();
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
                         }
                     }
                 })
