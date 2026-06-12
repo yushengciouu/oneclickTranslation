@@ -365,9 +365,16 @@ function App() {
           // 這既給予英文完美的渲染緩衝，又絕對不會像以前一樣無底線拉長到螢幕邊緣破壞整片圖表！
           const expansion = Math.min(40, boxW * 0.3);
           boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + expansion);
+        } else {
+          // 英翻中 (targetLang === "zh")：
+          // 當原文是側邊欄、設定列表這類「極短單字/列表項」（例如 Emails、Models、Features、Pages），
+          // 翻譯後的中文長度可能與英文相當甚至稍長，但原 OCR 偵測邊框「極窄」且「沒有緩衝邊緣」，
+          // 這會導致翻譯後的中文因為寬度被壓得太死，被迫發生「極其醜陋的單字卡線強制斷行」（例如：電 子 郵 件 變成上下垂直三行、儲 存 庫 變成兩行）。
+          // 解決方案：當偵測到偵測框寬度 w 較窄時，主動給予中文一個「最寬防折行補貼」（額外寬度：16px ~ 35px），
+          // 這既能保證短清單項目絕對能在單行內優雅舒展不折行，又不會拉長到破壞地圖或排版！
+          const paddingBonus = Math.max(16, Math.min(35, boxW * 0.4));
+          boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + paddingBonus);
         }
-        // 英翻中 (targetLang === "zh")：中文翻譯長度一般比英文原文更短且更緊湊，
-        // 寬度 100% 貼合原始英文 OCR 偵測寬度即可，不進行任何額外擴展，達到最乾淨的無痕覆蓋！
 
         const bgColor = sampleBgColor(
           imgEl,

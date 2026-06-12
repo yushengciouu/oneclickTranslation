@@ -189,10 +189,16 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
         .collect::<Vec<_>>()
         .join("\n");
     let system_prompt = format!(
-        "You are a translator. Translate each numbered {} text item to {}. \
-         Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. \
-         Same count as input. No extra lines, no explanations.",
-        src_desc, tgt_desc
+        "You are a professional setting panel and technical text translator. Translate each numbered {} text item into {}. \
+         \
+         Strict Guidelines:\
+         1. You MUST translate EVERY item. If an item is a single short word like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', you MUST translate it accurately (e.g. '電子郵件', '模型', '套件', 'Copilot', '功能列表', '頁面').\
+         2. Keep the translation concise and natural for software UI elements.\
+         3. Keep non-translatable technical names like 'GitHub', 'Settebello', 'Jalveer', 'Marivex' or brand names intact if there's no standard translation.\
+         4. Do NOT leave any item blank or untranslated. If you cannot translate, translate it to the best of your ability. Never omit items.\
+         5. Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. \
+         6. Return exactly {} translated items. No conversational filler, no extra lines, and no markdown formatting.",
+        src_desc, tgt_desc, n
     );
     let client = reqwest::Client::new();
     let body = serde_json::json!({
