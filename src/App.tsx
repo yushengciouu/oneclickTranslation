@@ -344,10 +344,21 @@ function App() {
         // 跳過 LLM 沒有翻譯到的行（行數不對齊時）
         if (!translated[i]?.trim()) return null;
 
-        // 保留原始 OCR x/width，譲表格不同欄不會隱响對方內容
+        // 保留原始 OCR x/width，讓表格不同欄不會影響對方內容
         const boxX = Math.max(activeSelection.x, fx);
-        const boxW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - boxX;
+        let boxW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - boxX;
         if (boxW <= 2) return null;
+
+        // 【高畫質安全寬度適配】：
+        if (targetLang === "en") {
+          // 中翻英：英文單字與字元長度通常比中文原文膨脹 1.3 ~ 1.6 倍。
+          // 為了提供英文單字折行及長片語呼吸空間，適度微調增加 20% ~ 35% 寬度（限制最高增加 40px），
+          // 這既給予英文完美的渲染緩衝，又絕對不會像以前一樣無底線拉長到螢幕邊緣破壞整片圖表！
+          const expansion = Math.min(40, boxW * 0.3);
+          boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + expansion);
+        }
+        // 英翻中 (targetLang === "zh")：中文翻譯長度一般比英文原文更短且更緊湊，
+        // 寬度 100% 貼合原始英文 OCR 偵測寬度即可，不進行任何額外擴展，達到最乾淨的無痕覆蓋！
 
         const bgColor = sampleBgColor(
           imgEl,
@@ -365,22 +376,6 @@ function App() {
           textColor: contrastColor(bgColor),
         };
       }).filter((t): t is TranslationLine => t !== null);
-
-      // 按 (y, x) 排序，然後將每個框的寬度延伸到同一行下一個框的左邊
-      // 避免短中文字（架構/訓練目標）的翻譯框太窄導致英文換行亂碼
-      result.sort((a, b) => Math.abs(a.y - b.y) < 8 ? a.x - b.x : a.y - b.y);
-      const ROW_THRESHOLD = 24; // 同一行的 y 差距容忍值（px）
-      for (let i = 0; i < result.length; i++) {
-        const selRight = activeSelection.x + activeSelection.width;
-        let rightBound = selRight;
-        for (let j = i + 1; j < result.length; j++) {
-          if (Math.abs(result[j].y - result[i].y) <= ROW_THRESHOLD && result[j].x > result[i].x) {
-            rightBound = Math.min(result[j].x - 2, selRight);
-            break;
-          }
-        }
-        result[i].width = Math.max(result[i].width, rightBound - result[i].x);
-      }
 
       setTranslations(result);
       setResultSelection(activeSelection);
