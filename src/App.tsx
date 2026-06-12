@@ -76,7 +76,7 @@ interface TranslationLine {
   textColor: string;
 }
 
-// 從截圖取樣 bounding box 邊框的平均背景色
+// 從截圖取樣 bounding box 的主導背景色（排除前景文字雜訊）
 function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h: number): string {
   const canvas = document.createElement("canvas");
   canvas.width = img.naturalWidth;
@@ -85,55 +85,63 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
   if (!ctx) return "#ffffff";
   ctx.drawImage(img, 0, 0);
 
-  // 定義邊框寬度，不宜太大以免踩到文字本身
-  const border = Math.max(1, Math.round(Math.min(w, h) * 0.08));
-  const clamp = (v: number, max: number) => Math.max(0, Math.min(Math.round(v), max));
   const W = img.naturalWidth, H = img.naturalHeight;
+  const rx = Math.max(0, Math.min(Math.round(x), W - 1));
+  const ry = Math.max(0, Math.min(Math.round(y), H - 1));
+  const rw = Math.max(1, Math.min(Math.round(w), W - rx));
+  const rh = Math.max(1, Math.min(Math.round(h), H - ry));
 
-  // 取得四個邊緣的取樣區域
-  const regions = [
-    [clamp(x + border, W), clamp(y, H), clamp(w - 2 * border, W - (x + border)), border], // 頂部（微縮，避開角隅）
-    [clamp(x + border, W), clamp(y + h - border, H), clamp(w - 2 * border, W - (x + border)), border], // 底部（微縮，避開角隅）
-    [clamp(x, W), clamp(y + border, H), border, clamp(h - 2 * border, H - (y + border))], // 左側（微縮，避開角隅）
-    [clamp(x + w - border, W), clamp(y + border, H), border, clamp(h - 2 * border, H - (y + border))], // 右側（微縮，避開角隅）
-  ] as [number, number, number, number][];
-
-  // 1. 收集所有取樣區域的 R, G, B 與對應的亮度 (Luminance)
-  const colors: { r: number; g: number; b: number; lum: number }[] = [];
-  
-  for (const [sx, sy, sw, sh] of regions) {
-    if (sw <= 0 || sh <= 0) continue;
-    const d = ctx.getImageData(sx, sy, sw, sh).data;
+  try {
+    const d = ctx.getImageData(rx, ry, rw, rh).data;
+    const colors: { r: number; g: number; b: number; lum: number }[] = [];
+    
     for (let i = 0; i < d.length; i += 4) {
       const r = d[i];
       const g = d[i + 1];
       const b = d[i + 2];
-      // 標準相對亮度公式
+      const a = d[i + 3];
+      if (a < 50) continue; // 忽略透明像素
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       colors.push({ r, g, b, lum });
     }
+
+    if (colors.length === 0) return "#ffffff";
+
+    // 使用偏向兩極群組中位數統計：
+    // 在有文字的地方，像素中不是背景色（佔大多數）就是文字筆劃顏色（佔少數，且通常是深黑或純白等極端顏色）。
+    // 我們先找出亮度的中位數，如果是亮背景（中位數 > 127），背景色會集中在亮端，進一步取 35% ~ 90% 的平均；
+    // 如果是暗背景（中位數 <= 127），背景色集中在暗端，進一步取 10% ~ 65% 的平均。
+    // 這能達到近乎完美地排乾除文字筆劃（反差極端色）雜訊，還原最真實的背景純色！
+    colors.sort((a, b) => a.lum - b.lum);
+    const medianLum = colors[Math.floor(colors.length / 2)].lum;
+    
+    let validSrc;
+    if (medianLum > 127) {
+      // 亮色背景：拋棄最暗的 35%（通常是黑色字體筆劃及其抗鋸齒邊緣）
+      const start = Math.floor(colors.length * 0.35);
+      const end = Math.floor(colors.length * 0.95);
+      validSrc = colors.slice(start, end);
+    } else {
+      // 暗色背景：拋棄最亮的 35%（通常是白色字體筆劃其暈開邊緣）
+      const start = Math.floor(colors.length * 0.05);
+      const end = Math.floor(colors.length * 0.65);
+      validSrc = colors.slice(start, end);
+    }
+
+    if (validSrc.length === 0) validSrc = colors;
+
+    let rSum = 0, gSum = 0, bSum = 0;
+    for (const c of validSrc) {
+      rSum += c.r;
+      gSum += c.g;
+      bSum += c.b;
+    }
+    const count = validSrc.length;
+    return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
+  } catch (e) {
+    console.error("取樣背景色失敗:", e);
+    return "#ffffff";
   }
-
-  if (colors.length === 0) return "#ffffff";
-
-  // 2. 排序並過濾掉極端值（中位數濾波）：排除掉可能碰到底層文字、外框線等高/低亮度雜訊
-  colors.sort((a, b) => a.lum - b.lum);
-
-  // 捨棄最低 25% 與最高 25% 的極端像素，只取中間 50% 像素
-  const startIndex = Math.floor(colors.length * 0.25);
-  const endIndex = Math.ceil(colors.length * 0.75);
-  const validColors = colors.slice(startIndex, endIndex);
-
-  let rSum = 0, gSum = 0, bSum = 0, count = 0;
-  for (const c of validColors) {
-    rSum += c.r;
-    gSum += c.g;
-    bSum += c.b;
-    count++;
-  }
-
-  if (count === 0) return "#ffffff";
-  return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
 }
 
 // 根據文字長度、寬度、高度，以及目前翻譯目標語言 (中文或英文)，動態計算最適合、最清晰舒適的字型大小
@@ -155,15 +163,17 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
   if (isZh) {
     // 英文翻中文 (en-zh)：
     // 中文字體複雜度高、筆劃較多，需要至少 11px 才清晰。由於中文翻譯長度多半比英文原文短，
-    // 容器寬度非常充裕，因此主動調大基準字體（調至 12.5px ~ 14.5px 視高度決定），能提供極高質量的精緻閱讀感。
-    const baseSize = Math.max(12, Math.min(14.5, height - 2.5));
+    // 為了保證大小層次分明（文章標題大、內文小），不應使用窄小的範圍硬性截斷。
+    // 我們將基準字體與原始框高（height）直接成等比比例縮放（height * 0.72），最低 11.5px。
+    const baseSize = Math.max(11.5, height * 0.72);
     const singleCharWidth = 0.98; // 中文接近 1:1 的正方形寬度
     const asciiCharWidth = 0.55;  // 半形字元寬度
     const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
 
     if (expectedWidth > width) {
-      if (height < 25) {
-        // 單行模式：盡可能縮小以容納，但中文下限設為 11px 避免糊成一團
+      // 動態判定：如果容器高度小於字體大小的 1.6 倍，說明空間只夠放單行文字
+      if (height < baseSize * 1.6) {
+        // 單行模式：盡可能縮小以容納，建置最低下限為 11px 以免字體太小模糊不清
         const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
         return `${Math.max(11, Math.min(baseSize, fitSize)).toFixed(1)}px`;
       } else {
@@ -179,15 +189,14 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
     return `${baseSize.toFixed(1)}px`;
   } else {
     // 中文翻英文 (zh-en)：
-    // 英文可讀性高，邊框尺寸即使低到 9.5px 依然清晰可辨。但英文翻譯長度較長，
-    // 有容易擠壓和重疊的傾向，故基準字體設定在較小的 11px 程度。
-    const baseSize = Math.max(10.5, Math.min(11.5, height - 3));
+    // 英文可讀性高，縮小至 9.5px 依然易讀。同樣採用等比縮放（height * 0.68），最低 10px。
+    const baseSize = Math.max(10, height * 0.68);
     const singleCharWidth = 0.95;
     const asciiCharWidth = 0.55;
     const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
 
     if (expectedWidth > width) {
-      if (height < 25) {
+      if (height < baseSize * 1.6) {
         // 單行模式：英文單形小寫下限設為 9.5px 依然易讀
         const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
         return `${Math.max(9.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
