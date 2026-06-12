@@ -136,34 +136,73 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
   return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
 }
 
-// 根據文字長度、寬度、高度，動態計算最適合的字型大小，確保在不重疊的前提下字型清晰可讀
-function getAutoFontSize(text: string, width: number, height: number): string {
+// 根據文字長度、寬度、高度，以及目前翻譯目標語言 (中文或英文)，動態計算最適合、最清晰舒適的字型大小
+function getAutoFontSize(text: string, width: number, height: number, targetLang: string): string {
   if (!text) return "11px";
-  let len = 0;
+  
+  let zhChars = 0;
+  let enChars = 0;
   for (let i = 0; i < text.length; i++) {
-    len += text.charCodeAt(i) > 127 ? 2 : 1; // 英文算 1，非英文算 2
-  }
-  
-  const charWidth = 6.2; // 預設 11px 字體下，半形字元在畫面上所佔大概寬度
-  const totalExpectedWidth = len * charWidth;
-  
-  if (totalExpectedWidth > width) {
-    if (height < 25) {
-      // 單行純文字框：縮小字體以維持單行不折行溢出（行高很矮，設定下界為 9.5px 避免字型過小）
-      const scaled = (width / len) / 0.55; 
-      return `${Math.max(9.5, Math.min(11, scaled)).toFixed(1)}px`;
+    if (text.charCodeAt(i) > 127) {
+      zhChars++;
     } else {
-      // 多行區塊：如果預期總面積大於實際可用面積，依比例調小字體
-      const area = width * height;
-      const requiredAreaAt11 = totalExpectedWidth * 13;
-      if (requiredAreaAt11 > area) {
-        const ratio = Math.sqrt(area / requiredAreaAt11);
-        // 設定下界為 9.5px，確保字型清晰可讀不傷眼
-        return `${Math.max(9.5, Math.min(11, 11 * ratio)).toFixed(1)}px`;
-      }
+      enChars++;
     }
   }
-  return "11px";
+
+  const isZh = targetLang === "zh";
+
+  if (isZh) {
+    // 英文翻中文 (en-zh)：
+    // 中文字體複雜度高、筆劃較多，需要至少 11px 才清晰。由於中文翻譯長度多半比英文原文短，
+    // 容器寬度非常充裕，因此主動調大基準字體（調至 12.5px ~ 14.5px 視高度決定），能提供極高質量的精緻閱讀感。
+    const baseSize = Math.max(12, Math.min(14.5, height - 2.5));
+    const singleCharWidth = 0.98; // 中文接近 1:1 的正方形寬度
+    const asciiCharWidth = 0.55;  // 半形字元寬度
+    const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
+
+    if (expectedWidth > width) {
+      if (height < 25) {
+        // 單行模式：盡可能縮小以容納，但中文下限設為 11px 避免糊成一團
+        const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
+        return `${Math.max(11, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+      } else {
+        // 多行模式
+        const area = width * height;
+        const requiredArea = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize * (baseSize * 1.35);
+        if (requiredArea > area) {
+          const ratio = Math.sqrt(area / requiredArea);
+          return `${Math.max(11, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
+        }
+      }
+    }
+    return `${baseSize.toFixed(1)}px`;
+  } else {
+    // 中文翻英文 (zh-en)：
+    // 英文可讀性高，邊框尺寸即使低到 9.5px 依然清晰可辨。但英文翻譯長度較長，
+    // 有容易擠壓和重疊的傾向，故基準字體設定在較小的 11px 程度。
+    const baseSize = Math.max(10.5, Math.min(11.5, height - 3));
+    const singleCharWidth = 0.95;
+    const asciiCharWidth = 0.55;
+    const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
+
+    if (expectedWidth > width) {
+      if (height < 25) {
+        // 單行模式：英文單形小寫下限設為 9.5px 依然易讀
+        const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
+        return `${Math.max(9.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+      } else {
+        // 多行模式
+        const area = width * height;
+        const requiredArea = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize * (baseSize * 1.25);
+        if (requiredArea > area) {
+          const ratio = Math.sqrt(area / requiredArea);
+          return `${Math.max(9.5, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
+        }
+      }
+    }
+    return `${baseSize.toFixed(1)}px`;
+  }
 }
 
 // 根據背景亮度選擇黑或白文字
@@ -506,7 +545,8 @@ function App() {
           pointerEvents: "none",
         }}>
           {translations.map((t, i) => {
-            const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height);
+            const targetLang = transDir === "zh-en" ? "en" : "zh";
+            const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height, targetLang);
             // 加上上下左右少許 padding/margin 偏移與尺寸膨脹補貼，確保完美蓋住原文
             const paddingOffset = 1.5; 
             return (
@@ -518,6 +558,11 @@ function App() {
                 fontSize: dynamicFontSize,
                 background: t.bgColor,
                 color: t.textColor,
+                // 高度特製化文字與排版設定
+                lineHeight: targetLang === "zh" ? 1.35 : 1.25,
+                wordBreak: targetLang === "zh" ? "break-all" : "break-word",
+                letterSpacing: targetLang === "zh" ? "0.02em" : "-0.012em",
+                fontWeight: targetLang === "zh" ? 550 : 500,
               }}>
                 {t.translated}
               </div>

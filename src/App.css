@@ -285,20 +285,6 @@ button.btn-danger:hover {
   filter: brightness(1.15);
 }
 
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
 .container {
   margin: 0;
   padding-top: 10vh;
@@ -400,8 +386,9 @@ button {
   padding: 2px 5px;
   pointer-events: none;
   display: flex;
-  align-items: flex-start; /* 保持靠左靠上對齊，與原始文字排版完美吻合 */
-  justify-content: flex-start;
+  flex-direction: column;   /* 設為 column 結合 justify-content: center */
+  justify-content: center;  /* 讓翻譯後的內容不論單/多行均在原始區塊內垂直居中對齊 */
+  align-items: flex-start;  /* 保持靠左對齊，與原始排版完美吻合 */
   box-sizing: border-box;
   font-size: 11px;
   font-weight: 500;
