@@ -123,7 +123,7 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
             .map_err(|e| e.to_string())?;
 
         let language =
-            Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;;
+            Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;
         let engine =
             OcrEngine::TryCreateFromLanguage(&language).map_err(|e| e.to_string())?;
 
@@ -308,15 +308,110 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 攔截關閉事件，改為隱藏視窗以實現關閉後常駐背景運作
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
+            use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+            use tauri::menu::{Menu, MenuItem};
+
+            // 建立系統聯絡功能選單 (System Tray Menu)
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &MenuItem::with_id(app, "show", "開啟介面 / Show Window", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "quit", "關閉程式 / Quit", true, None::<&str>)?,
+                ],
+            )?;
+
+            // 實作托盤圖示與事件回饋
+            let icon = app.default_window_icon().cloned();
+            let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
+            if let Some(i) = icon {
+                tray_builder = tray_builder.icon(i);
+            }
+
+            let _tray = tray_builder
+                .on_menu_event(|app_handle, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app_handle.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { button_state: _, .. } = event {
+                        let app_handle = tray.app_handle();
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             let shortcut =
                 Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyT);
+            
+            let app_handle_clone = app.handle().clone();
             app.global_shortcut()
-                .on_shortcut(shortcut, |app_handle, _shortcut, event| {
+                .on_shortcut(shortcut, move |_, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.emit("toggle-capture", ());
-                        }
+                        let handle = app_handle_clone.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let is_fullscreen = window.is_fullscreen().unwrap_or(false);
+                                if is_fullscreen {
+                                    // 若已在覆蓋選取模式，再次按下捷徑則退出覆蓋，回歸正常狀態
+                                    let _ = window.emit("toggle-capture", ());
+                                } else {
+                                    // 核心防休眠：直接於 Rust 背景層做螢幕截取，規避 minimized 時 Webview2 JavaScript 休眠失效之痛點
+                                    let _ = window.unminimize();
+                                    let _ = window.hide();
+                                    
+                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                    let screens = match Screen::all() {
+                                        Ok(s) => s,
+                                        Err(_) => return,
+                                    };
+                                    let screen = screens
+                                        .iter()
+                                        .find(|s| s.display_info.is_primary)
+                                        .or_else(|| screens.first());
+                                    
+                                    if let Some(s) = screen {
+                                        if let Ok(image) = s.capture() {
+                                            let dynamic = DynamicImage::ImageRgba8(image);
+                                            let mut cursor = Cursor::new(Vec::new());
+                                            if dynamic.write_to(&mut cursor, ImageFormat::Png).is_ok() {
+                                                let buffer = cursor.into_inner();
+                                                let encoded = general_purpose::STANDARD.encode(&buffer);
+                                                let data_url = format!("data:image/png;base64,{}", encoded);
+                                                
+                                                // 截圖完成後瞬間不降維度，全向載入畫面並賦予最上層控制焦點
+                                                let _ = window.unminimize();
+                                                let _ = window.set_fullscreen(true);
+                                                let _ = window.set_always_on_top(true);
+                                                let _ = window.show();
+                                                let _ = window.set_focus();
+                                                let _ = window.emit("toggle-capture", data_url);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
                 })?;
             Ok(())
