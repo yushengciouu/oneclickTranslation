@@ -11,11 +11,13 @@ const SETTINGS_KEY = "screen-translator-settings";
 const DEFAULT_SETTINGS = {
   apiUrl: "http://192.168.39.143:8001",
   model: "gemma-4:31B",
+  shortcut: "Ctrl+Shift+T",
 };
 
 interface AppSettings {
   apiUrl: string;
   model: string;
+  shortcut: string;
 }
 
 function loadSettings(): AppSettings {
@@ -243,7 +245,6 @@ function App() {
   const [mode, setMode] = useState<AppMode>("idle");
   const [lang, setLang] = useState<Lang>("zh");
   const [transDir, setTransDir] = useState<TransDir>("zh-en");
-  const t = LOCALE[lang];
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [translations, setTranslations] = useState<TranslationLine[]>([]);
@@ -252,6 +253,61 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(loadSettings);
+  const [isRecording, setIsRecording] = useState(false);
+
+  const handleShortcutKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // 取得 Modifiers
+    const keys: string[] = [];
+    if (e.ctrlKey) keys.push("Ctrl");
+    if (e.shiftKey) keys.push("Shift");
+    if (e.altKey) keys.push("Alt");
+    if (e.metaKey) keys.push("Super"); // Windows 鍵 / Command 鍵
+
+    const key = e.key;
+    // 避開單按修飾鍵 (Modifier key down) 的階段
+    if (
+      key !== "Control" &&
+      key !== "Shift" &&
+      key !== "Alt" &&
+      key !== "Meta"
+    ) {
+      let keyName = key.toUpperCase();
+      // 轉換特殊按鍵為 Tauri 規範
+      if (keyName === "ARROWUP") keyName = "Up";
+      else if (keyName === "ARROWDOWN") keyName = "Down";
+      else if (keyName === "ARROWLEFT") keyName = "Left";
+      else if (keyName === "ARROWRIGHT") keyName = "Right";
+      else if (keyName === "ESCAPE") keyName = "Escape";
+      else if (keyName === "ENTER") keyName = "Enter";
+      else if (keyName === "BACKSPACE") keyName = "Backspace";
+      else if (keyName === "DELETE") keyName = "Delete";
+      else if (keyName === "TAB") keyName = "Tab";
+      else if (keyName === " ") keyName = "Space";
+      else if (keyName.length === 1) {
+        // 一般字母/數字字元，維持原樣
+        keyName = keyName;
+      } else {
+        // 特殊功能鍵 F1-F12，首字母大寫即可
+        keyName = key.charAt(0).toUpperCase() + key.slice(1);
+      }
+
+      keys.push(keyName);
+      const shortcutStr = keys.join("+");
+      setDraftSettings(s => ({ ...s, shortcut: shortcutStr }));
+      setIsRecording(false);
+    }
+  };
+
+  const rawT = LOCALE[lang];
+  const t = {
+    ...rawT,
+    subtitle: lang === "zh" 
+      ? `按 ${settings.shortcut} 或點按鈕開始截圖翻譯` 
+      : `Press ${settings.shortcut} or click the button to capture`,
+  };
 
   const modeRef = useRef<AppMode>("idle");
   const isDragging = useRef(false);
@@ -425,6 +481,15 @@ function App() {
   }, [screenshot, handleTranslate]);
 
   useEffect(() => {
+    // 程式啟動時，自動讀取並向 Rust 註冊當前的用戶設定快捷鍵
+    invoke("update_shortcut", { shortcutStr: settings.shortcut })
+      .catch((err) => {
+        console.error("無法初始化自訂快速鍵:", err);
+        setError(`無法初始化自訂快速鍵: ${err}`);
+      });
+  }, []);
+
+  useEffect(() => {
     let cleanup: (() => void) | undefined;
     listen("toggle-capture", handleToggle).then((fn) => { cleanup = fn; });
     return () => cleanup?.();
@@ -496,7 +561,7 @@ function App() {
         </div>
 
         {showSettings && (
-          <div className="settings-overlay" onClick={() => setShowSettings(false)}>
+          <div className="settings-overlay" onClick={() => { setShowSettings(false); setIsRecording(false); }}>
             <div className="settings-modal" onClick={e => e.stopPropagation()}>
               <h3>設定 / Settings</h3>
               <label>
@@ -519,12 +584,57 @@ function App() {
                   spellCheck={false}
                 />
               </label>
+              <label>
+                自訂快捷鍵 / Custom Shortcut
+                <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
+                  <input
+                    type="text"
+                    value={isRecording ? "請按下鍵盤設定組合鍵..." : draftSettings.shortcut}
+                    readOnly
+                    onKeyDown={handleShortcutKeyDown}
+                    style={{
+                      flex: 1,
+                      backgroundColor: isRecording ? "#2c1e4a" : "#2a2a3e",
+                      borderColor: isRecording ? "#a29bfe" : "#555",
+                      color: isRecording ? "#a29bfe" : "#e0e0e0",
+                      fontWeight: isRecording ? "600" : "normal",
+                      textAlign: "center",
+                      cursor: "pointer",
+                    }}
+                    onClick={() => setIsRecording(true)}
+                    placeholder="點擊並按下任意組合鍵"
+                  />
+                  {isRecording ? (
+                    <button
+                      className="btn-secondary"
+                      style={{ padding: "8px 12px", height: "38px", margin: 0 }}
+                      onClick={() => setIsRecording(false)}
+                    >
+                      取消
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary"
+                      style={{ padding: "8px 12px", height: "38px", margin: 0, backgroundColor: "#6c5ce7" }}
+                      onClick={() => setIsRecording(true)}
+                    >
+                      錄製
+                    </button>
+                  )}
+                </div>
+              </label>
               <div className="settings-actions">
-                <button className="btn-secondary" onClick={() => setShowSettings(false)}>取消</button>
-                <button className="btn-primary" onClick={() => {
-                  saveSettings(draftSettings);
-                  setSettings(draftSettings);
-                  setShowSettings(false);
+                <button className="btn-secondary" onClick={() => { setShowSettings(false); setIsRecording(false); }}>取消</button>
+                <button className="btn-primary" onClick={async () => {
+                  try {
+                    await invoke("update_shortcut", { shortcutStr: draftSettings.shortcut });
+                    saveSettings(draftSettings);
+                    setSettings(draftSettings);
+                    setShowSettings(false);
+                    setError(null);
+                  } catch (err) {
+                    setError(`快速鍵註冊失敗（可能與作業系統其他軟體衝突）: ${err}`);
+                  }
                 }}>儲存</button>
               </div>
             </div>

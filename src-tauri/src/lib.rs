@@ -251,6 +251,26 @@ fn close_overlay(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn update_shortcut(app_handle: tauri::AppHandle, shortcut_str: String) -> Result<(), String> {
+    use std::str::FromStr;
+    let global_shortcut = app_handle.global_shortcut();
+
+    // 解析新快捷鍵
+    let new_shortcut = Shortcut::from_str(&shortcut_str)
+        .map_err(|_| "無法解析快速鍵！格式必須類似 'Ctrl+Shift+T' 或 'F1'".to_string())?;
+
+    // 為了安全乾淨，先註銷此前所有的快捷鍵
+    let _ = global_shortcut.unregister_all();
+
+    // 註冊最新的快捷鍵
+    global_shortcut
+        .register(new_shortcut)
+        .map_err(|e| format!("無法註冊快速鍵，可能已被系統其他程式佔用: {}", e))?;
+
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct VisionLine {
     original: String,
@@ -313,7 +333,58 @@ async fn vision_ocr_translate(image_base64: String, api_url: String, model: Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app_handle, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        let handle = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let is_fullscreen = window.is_fullscreen().unwrap_or(false);
+                                if is_fullscreen {
+                                    // 若已在覆蓋選取模式，再次按下捷徑則退出覆蓋，回歸正常狀態
+                                    let _ = window.emit("toggle-capture", ());
+                                } else {
+                                    // 核心防休眠：直接於 Rust 背景層做螢幕截取，規避 minimized 時 Webview2 JavaScript 休眠失效之痛點
+                                    let _ = window.unminimize();
+                                    let _ = window.hide();
+                                    
+                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                    let screens = match Screen::all() {
+                                        Ok(s) => s,
+                                        Err(_) => return,
+                                    };
+                                    let screen = screens
+                                        .iter()
+                                        .find(|s| s.display_info.is_primary)
+                                        .or_else(|| screens.first());
+                                    
+                                    if let Some(s) = screen {
+                                        if let Ok(image) = s.capture() {
+                                            let dynamic = DynamicImage::ImageRgba8(image);
+                                            let mut cursor = Cursor::new(Vec::new());
+                                            if dynamic.write_to(&mut cursor, ImageFormat::Png).is_ok() {
+                                                let buffer = cursor.into_inner();
+                                                let encoded = general_purpose::STANDARD.encode(&buffer);
+                                                let data_url = format!("data:image/png;base64,{}", encoded);
+                                                
+                                                // 截圖完成後瞬間不降維度，全向載入畫面並賦予最上層控制焦點
+                                                let _ = window.unminimize();
+                                                let _ = window.set_fullscreen(true);
+                                                let _ = window.set_always_on_top(true);
+                                                let _ = window.show();
+                                                let _ = window.set_focus();
+                                                let _ = window.emit("toggle-capture", data_url);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                })
+                .build(),
+        )
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // 攔截關閉事件，改為隱藏視窗以實現關閉後常駐背景運作
@@ -371,59 +442,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // 註冊初次預設快速鍵 (在 React 接管並更新前做為安全後備碼)
             let shortcut =
                 Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyT);
-            
-            let app_handle_clone = app.handle().clone();
-            app.global_shortcut()
-                .on_shortcut(shortcut, move |_, _shortcut, event| {
-                    if event.state == ShortcutState::Pressed {
-                        let handle = app_handle_clone.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Some(window) = handle.get_webview_window("main") {
-                                let is_fullscreen = window.is_fullscreen().unwrap_or(false);
-                                if is_fullscreen {
-                                    // 若已在覆蓋選取模式，再次按下捷徑則退出覆蓋，回歸正常狀態
-                                    let _ = window.emit("toggle-capture", ());
-                                } else {
-                                    // 核心防休眠：直接於 Rust 背景層做螢幕截取，規避 minimized 時 Webview2 JavaScript 休眠失效之痛點
-                                    let _ = window.unminimize();
-                                    let _ = window.hide();
-                                    
-                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                                    let screens = match Screen::all() {
-                                        Ok(s) => s,
-                                        Err(_) => return,
-                                    };
-                                    let screen = screens
-                                        .iter()
-                                        .find(|s| s.display_info.is_primary)
-                                        .or_else(|| screens.first());
-                                    
-                                    if let Some(s) = screen {
-                                        if let Ok(image) = s.capture() {
-                                            let dynamic = DynamicImage::ImageRgba8(image);
-                                            let mut cursor = Cursor::new(Vec::new());
-                                            if dynamic.write_to(&mut cursor, ImageFormat::Png).is_ok() {
-                                                let buffer = cursor.into_inner();
-                                                let encoded = general_purpose::STANDARD.encode(&buffer);
-                                                let data_url = format!("data:image/png;base64,{}", encoded);
-                                                
-                                                // 截圖完成後瞬間不降維度，全向載入畫面並賦予最上層控制焦點
-                                                let _ = window.unminimize();
-                                                let _ = window.set_fullscreen(true);
-                                                let _ = window.set_always_on_top(true);
-                                                let _ = window.show();
-                                                let _ = window.set_focus();
-                                                let _ = window.emit("toggle-capture", data_url);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                })?;
+            let _ = app.global_shortcut().register(shortcut);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -431,7 +453,8 @@ pub fn run() {
             close_overlay,
             ocr_image,
             translate_lines,
-            vision_ocr_translate
+            vision_ocr_translate,
+            update_shortcut
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
