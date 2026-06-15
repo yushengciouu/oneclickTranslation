@@ -226,16 +226,17 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
                 let is_symbol = w0.text.chars().all(|c| !c.is_alphanumeric());
                 
                 // 圓形、齒輪、括號、箭頭、播放、垃圾碎點、貨幣等多樣化 UI Icon 經常被誤判成的單字
-                let is_single_character_icon = w0.text.chars().count() == 1 && {
+                // 常見微軟 OCR 把垃圾桶、資料夾、帳號展開箭頭等誤判為中/英文字詞（例如 🗑️ 誤判為 "刪"，📁 誤判為 "寄"，🔍 誤判為 "搜尋"，展開箭頭 ◀/▼ 誤判為 "u" 或 "U"）。
+                let is_single_character_icon = (w0.text.chars().count() == 1 && {
                     let c = w0.text.chars().next().unwrap();
-                    "oOqQvVxXiIlcCcC01>＞•▪▫▫◽◾-—_、#+=$".contains(c)
-                };
+                    "oOqQvVxXiIlcCcC01>＞•▪▫▫◽◾-—_、#+=$刪寄uU".contains(c)
+                }) || w0.text == "搜尋";
 
                 if is_symbol || is_single_character_icon {
                     // 計算此區塊與右側主要文字間的水平間距 (Gap)
                     let gap = w1.x - (w0.x + w0.w);
-                    // 只要間距顯著（大於文字高度的 0.35 倍，或物理像素大於 6.5px）
-                    if gap > w0.h * 0.35 || gap > 6.5 {
+                    // 只要間距顯著（大於文字高度的 0.3 倍，或物理像素大於 5.0px）
+                    if gap > w0.h * 0.3 || gap > 5.0 {
                         // 認定第一個詞僅為裝飾 Icon，排除之以保障排版與背景顏色絕對不遮擋原 App 圖標！
                         start_idx = 1;
                     }
@@ -244,14 +245,14 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
 
             // 2. 【末端 Icon/箭頭 篩選】：例如選單右側的展開箭頭 “>” 或下移選單符號等
             if word_list.len() - start_idx >= 2 {
-                let last_idx = word_list.len() - 1;
+                let last_idx = end_idx - 1;
                 let w_last = &word_list[last_idx];
                 let w_prev = &word_list[last_idx - 1];
 
                 let is_symbol = w_last.text.chars().all(|c| !c.is_alphanumeric());
                 let is_single_character_icon = w_last.text.chars().count() == 1 && {
                     let c = w_last.text.chars().next().unwrap();
-                    "vVxX>＞vV^▫▪◽◾_".contains(c)
+                    "vVxX>＞vV^▫▪◽◾_uU".contains(c)
                 };
 
                 if is_symbol || is_single_character_icon {
@@ -263,7 +264,24 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
                 }
             }
 
-            // 3. 重組排除 Icon 後的淨化文字
+            // 3. 【末端 數字/未讀數 篩選】：例如 Mail 資料夾右側的未讀數 "7" 或 "(7)"
+            // 若最右側單字為純數字，且與左側相鄰文字有足夠間距，我們不將其納入覆蓋框中，以保留 Outlook 原生的未讀數樣式與顏色。
+            if (end_idx > start_idx) && (end_idx - start_idx >= 2) {
+                let last_idx = end_idx - 1;
+                let w_last = &word_list[last_idx];
+                let w_prev = &word_list[last_idx - 1];
+
+                let is_pure_digit = w_last.text.chars().all(|c| c.is_ascii_digit() || "()（）".contains(c));
+                if is_pure_digit {
+                    let gap = w_last.x - (w_prev.x + w_prev.w);
+                    if gap > w_last.h * 0.3 || gap > 5.0 {
+                        // 排除尾端未讀數
+                        end_idx = last_idx;
+                    }
+                }
+            }
+
+            // 4. 重組排除 Icon 與未讀數後的淨化文字
             let clean_text = if start_idx == 0 && end_idx == word_list.len() {
                 raw_text
             } else if start_idx >= end_idx {
