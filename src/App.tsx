@@ -393,20 +393,23 @@ function App() {
       const scaleX = imgEl.naturalWidth / window.innerWidth;
       const scaleY = imgEl.naturalHeight / window.innerHeight;
 
-      // 【根本解法：X 軸展開至全螢幕寬度，只用 Y 軸過濾行數】
+      // 【根本解法：X 軸向左右各延伸 500 原生像素，確保 OCR 能看到完整的每一行文字】
       // 問題根源：若用戶框選很窄（例如只選 30px 寬），傳給 OCR 的裁切圖也很窄，
-      // OCR 只看到每行文字的殘缺片段（如 "Sent Backup" 有 120px 寬只能看到 30px），
-      // 無法辨識不完整的字，導致漏字、辨識失敗。框越大品質越好，就是這個原因。
-      // 解決方案：裁切時 X 軸固定擴展到全螢幕寬，讓 OCR 永遠能看到完整的一整行文字。
-      // Y 軸仍對準使用者的選取範圍（± 少量安全 padding），最後再用 Y 軸座標過濾出選取區內的行。
-      const fullWidthRect: Rect = {
-        x: 0,
+      // OCR 只看到每行文字的殘缺片段，無法辨識不完整的字。
+      // 解決方案：X 軸在選取範圍左右各延伸 500 原生像素（約 400 CSS px）
+      //   - 足以涵蓋側邊欄、清單、選單等任何 UI 控件的完整行寬
+      //   - 不像全螢幕寬度那樣把整張圖拖進來降低縮放比例與 OCR 精度
+      const expandPx = 500;
+      const cropX0 = Math.max(0, Math.round(activeSelection.x * scaleX) - expandPx);
+      const cropX1 = Math.min(imgEl.naturalWidth, Math.round((activeSelection.x + activeSelection.width) * scaleX) + expandPx);
+      const captureRect: Rect = {
+        x: cropX0,
         y: Math.round(activeSelection.y * scaleY),
-        width: imgEl.naturalWidth,
+        width: cropX1 - cropX0,
         height: Math.round(activeSelection.height * scaleY),
       };
       const padAmount = 32;
-      const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, fullWidthRect, padAmount);
+      const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, captureRect, padAmount);
 
       // Step 1：Windows OCR 取得每行文字與精確座標
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
@@ -438,9 +441,10 @@ function App() {
       //         因為裁切使用了絕對對齊的 activeSelection（無 Pad 偏移），
       //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
       const resultBeforeFilter = ocrLines.map((line, i) => {
-        // 先減去 padX/padY 還原為 cropped 之前無 Padding 的純物理座標，再除以 scaleX 換算為 logical pixels！
-        // 注意：cropRect 的 X 起始為 0（全螢幕寬），所以 fx 直接是絕對螢幕座標。
-        const fx = (line.x - padX) / scaleX;
+        // 先減去 padX/padY 還原為 cropped 之前無 Padding 的純物理座標，再換算為絕對螢幕 CSS 座標
+        // cropX0 是裁切起始點（原生像素），除以 scaleX 得 CSS 像素的起始偏移
+        const cropStartCssX = cropX0 / scaleX;
+        const fx = cropStartCssX + (line.x - padX) / scaleX;
         const fy = activeSelection.y + (line.y - padY) / scaleY;
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;

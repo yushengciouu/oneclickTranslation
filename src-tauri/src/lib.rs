@@ -219,37 +219,54 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
             let mut start_idx = 0;
             let mut end_idx = word_list.len();
 
-            // 1. 【開端 Icon 檢測篩選（無硬編碼泛化版）】：
-            // 如果首個單字 w0 只有單個字元（不論中文字、英文字母、特殊符號還是數字），
-            // 且與右側次個單字 w1 之間存在顯著的排版間距空白 (Gap)，則極大概率是 UI 裡的圓點、垃圾桶、資料夾等 Icon 圖標。
-            // 排除它可以保護原生的高質感 Icon 不被翻譯覆蓋框吞噬！
+            // 1. 【開端 Icon 檢測篩選（泛化版：單字元直接判間距，雙字元加寬高比驗證）】：
+            // UI Icon 圖標（垃圾桶、資料夾、郵件等）被 OCR 誤判成 1~2 個字元時，
+            // 其寬度遠小於真正文字（多個字元擠在圖標寬度內 → 每字元寬度偏窄），
+            // 利用寬高比例 (w / h / char_count) 可區分圖標誤判 vs 真正的短詞（如「草稿」）。
             if word_list.len() >= 2 {
                 let w0 = &word_list[0];
                 let w1 = &word_list[1];
-                let is_single_char = w0.text.chars().count() == 1;
+                let char_count = w0.text.chars().count();
+                let gap = w1.x - (w0.x + w0.w);
 
-                if is_single_char {
-                    // 計算與右側主要文字的實際排版間距 (Gap)
-                    let gap = w1.x - (w0.x + w0.w);
-                    // 只要 Gap 大於單個字元高度的 0.4 倍（或物理像素 > 6.0px），即代表其並非文字的一部分，而是個獨立的 Icon 或 Bullet 標記
-                    if gap > w0.h * 0.4 || gap > 6.0 {
-                        start_idx = 1;
-                    }
+                let is_icon = if char_count == 1 {
+                    // 單字元：直接用間距判定（維持原有邏輯）
+                    gap > w0.h * 0.4 || gap > 6.0
+                } else if char_count == 2 {
+                    // 雙字元：額外驗證寬高比是否為圖標特徵
+                    // 正常雙字元（如「草稿」）：w ≈ 2 * h，比值 > 1.4
+                    // 圖標誤判雙字元（如「垃圾」from 🗑️）：w ≈ icon_size，比值 < 1.0
+                    let ratio = w0.w / (w0.h.max(1.0));
+                    ratio < (char_count as f32) * 0.7 && (gap > w0.h * 0.4 || gap > 6.0)
+                } else {
+                    false
+                };
+
+                if is_icon {
+                    start_idx = 1;
                 }
             }
 
-            // 2. 【末端 Icon/箭頭/折疊標記 篩選】：例如選單最右側的展開/折疊箭頭符號
+            // 2. 【末端 Icon/箭頭/折疊標記 篩選（同上，加寬高比驗證）】
             if word_list.len() - start_idx >= 2 {
                 let last_idx = end_idx - 1;
                 let w_last = &word_list[last_idx];
                 let w_prev = &word_list[last_idx - 1];
 
-                let is_single_char = w_last.text.chars().count() == 1;
-                if is_single_char {
-                    let gap = w_last.x - (w_prev.x + w_prev.w);
-                    if gap > w_last.h * 0.4 || gap > 6.0 {
-                        end_idx = last_idx;
-                    }
+                let char_count = w_last.text.chars().count();
+                let gap = w_last.x - (w_prev.x + w_prev.w);
+
+                let is_icon = if char_count == 1 {
+                    gap > w_last.h * 0.4 || gap > 6.0
+                } else if char_count == 2 {
+                    let ratio = w_last.w / (w_last.h.max(1.0));
+                    ratio < (char_count as f32) * 0.7 && (gap > w_last.h * 0.4 || gap > 6.0)
+                } else {
+                    false
+                };
+
+                if is_icon {
+                    end_idx = last_idx;
                 }
             }
 
