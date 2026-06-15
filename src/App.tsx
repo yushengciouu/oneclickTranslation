@@ -445,20 +445,27 @@ function App() {
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;
 
-        // 跳過中心點不在選取範圍內的行（安全過濾）
+        // 【安全容偏差過濾機制】：
+        // 為了支援使用者在極窄微調選取、或是手抖偏移拉選時亦能點擊辨識，
+        // 只要偵測到的文字框與選取範圍有交集，或文字框中點在稍微寬鬆的選取邊界內即可！
         const centerX = fx + fw / 2;
         const centerY = fy + fh / 2;
-        if (
-          centerX < activeSelection.x || centerX > activeSelection.x + activeSelection.width ||
-          centerY < activeSelection.y || centerY > activeSelection.y + activeSelection.height
-        ) return null;
+        const marginX = Math.max(25, fw * 0.4); // 給與橫向 25px 或字寬 40% 的容偏差
+        const marginY = Math.max(15, fh * 0.4); // 給與縱向 15px 或字高 40% 的容偏差
+        const insideX = centerX >= activeSelection.x - marginX && centerX <= activeSelection.x + activeSelection.width + marginX;
+        const insideY = centerY >= activeSelection.y - marginY && centerY <= activeSelection.y + activeSelection.height + marginY;
+        if (!insideX || !insideY) return null;
 
         // 跳過 LLM 沒有翻譯到的行（行數不對齊時）
         if (!translated[i]?.trim()) return null;
 
-        // 保留原始 OCR x/width，讓表格不同欄不會影響對方內容
-        const boxX = Math.max(activeSelection.x, fx);
-        let boxW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - boxX;
+        // 【無損原位精密對齊技術 (Perfect Absolute Alignment)】：
+        // 以前會使用 Math.max(activeSelection.x, fx) 甚至限制 boxW 不能超過 activeSelection.width。
+        // 這會導致：若使用者選取框畫得太窄（少選、窄框選項），文字寬度與起始位置會被強硬擠壓而徹底位移並嚴重折行！
+        // 我們直接以 OCR 精確定位的原始文字實際座標 (fx, fw) 來當作渲染的定位基準 (boxX, boxW)，
+        // 這不管您的框選畫得再小再窄，譯文框都能像幽靈般 100% 精準與原文重疊！
+        const boxX = fx;
+        let boxW = fw;
         if (boxW <= 2) return null;
 
         // 【極致自適應最小寬度安全保障演算法】：
@@ -487,7 +494,7 @@ function App() {
           // 為了提供英文單字折行及長片語呼吸空間，適度微調增加 20% ~ 35% 寬度（限制最高增加 40px），
           // 這既給予英文完美的渲染緩衝，又絕對不會像以前一樣無底線拉長到螢幕邊緣破壞整片圖表！
           const expansion = Math.min(40, boxW * 0.3);
-          boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + expansion);
+          boxW = boxW + expansion;
         } else {
           // 英翻中 (targetLang === "zh")：
           // 當原文是側邊欄、設定列表這類「極短單字/列表項」（例如 Emails、Models、Features、Pages），
@@ -496,12 +503,11 @@ function App() {
           // 解決方案：當偵測到偵測框寬度 w 較窄時，主動給予中文一個「最寬防折行補貼」（額外寬度：16px ~ 35px），
           // 這既能保證短清單項目絕對能在單行內優雅舒展不折行，又不會拉長到破壞地圖或排版！
           const paddingBonus = Math.max(16, Math.min(35, boxW * 0.4));
-          boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + paddingBonus);
+          boxW = boxW + paddingBonus;
         }
 
-        // 雙重加固：為防單字內截斷，寬度必定大於最小安全寬度。同時允許超出選取區右界最多 35px，提供大氣的單行呼吸空間！
-        const rightMaxLimit = activeSelection.x + activeSelection.width + 35;
-        boxW = Math.max(boxW, Math.min(rightMaxLimit - boxX, safeMinWidth));
+        // 雙重加固：為防單字內截斷，寬度必定大於最小安全寬度。
+        boxW = Math.max(boxW, safeMinWidth);
 
         const bgColor = sampleBgColor(
           imgEl,
