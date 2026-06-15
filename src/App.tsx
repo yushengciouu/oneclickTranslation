@@ -191,24 +191,26 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
     return `${baseSize.toFixed(1)}px`;
   } else {
     // 中文翻英文 (zh-en)：
-    // 英文可讀性高，縮小至 9.5px 依然易讀。同樣採用等比縮放（height * 0.68），最低 10px。
-    const baseSize = Math.max(10, height * 0.68);
+    // 英文雖然可讀性高，但如果基準字體和下界拉得太低，在日常螢幕閱讀時依然會顯得太小、吃力。
+    // 我們同步將中翻英的文字比例調優：基準字體與原始框高成等比比例縮放 (height * 0.72)，
+    // 同時將中翻英的最舒服閱讀下限字體從 9.5px 顯著拉高至 11px，保障英文在任何時候都大氣清晰、舒適好讀！
+    const baseSize = Math.max(11.5, height * 0.72);
     const singleCharWidth = 0.95;
     const asciiCharWidth = 0.55;
     const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
 
     if (expectedWidth > width) {
       if (height < baseSize * 1.6) {
-        // 單行模式：英文單形小寫下限設為 9.5px 依然易讀
+        // 單行模式：盡可能縮小以容納，最低下限設為 11px，保障在中翻英時英文不要縮得太小
         const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
-        return `${Math.max(9.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+        return `${Math.max(11, Math.min(baseSize, fitSize)).toFixed(1)}px`;
       } else {
         // 多行模式
         const area = width * height;
         const requiredArea = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize * (baseSize * 1.25);
         if (requiredArea > area) {
           const ratio = Math.sqrt(area / requiredArea);
-          return `${Math.max(9.5, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
+          return `${Math.max(11, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
         }
       }
     }
@@ -374,6 +376,10 @@ function App() {
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
       const targetLang = transDir === "zh-en" ? "en" : "zh";
       const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang });
+      
+      console.log(`[OCR] 偵測語言為 ${ocrLang}，共擷取到 ${ocrLines.length} 行文字:`);
+      console.table(ocrLines.map((l, idx) => ({ 索引: idx, 文字: l.text, X: Math.round(l.x), Y: Math.round(l.y), 寬: Math.round(l.width), 高: Math.round(l.height) })));
+
       if (ocrLines.length === 0) {
         setError(t.noText);
         setMode("selecting");
@@ -389,10 +395,13 @@ function App() {
         model: settings.model,
       });
 
+      console.log(`[LLM] 翻譯語言為 ${targetLang}，接收了 ${texts.length} 行，返回了 ${translated.length} 行譯文:`);
+      console.table(ocrLines.map((l, idx) => ({ 原文: l.text, 譯文: translated[idx] || "（解析失敗/未返回）" })));
+
       // Step 3：座標換算（OCR 回傳的是相對於 cropped 裁切圖片的原生像素）
       //         因為裁切使用了絕對對齊的 activeSelection（無 Pad 偏移），
       //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
-      const result: TranslationLine[] = ocrLines.map((line, i) => {
+      const resultBeforeFilter = ocrLines.map((line, i) => {
         const fx = activeSelection.x + line.x / scaleX;
         const fy = activeSelection.y + line.y / scaleY;
         const fw = line.width / scaleX;
@@ -449,6 +458,50 @@ function App() {
         };
       }).filter((t): t is TranslationLine => t !== null);
 
+      // 【極致重疊安全與過濾演算法】：
+      // Windows OCR 有時會對極為密集的清單，將「整行大字」與「裡面的細部拆分字詞」同時以多個重疊框回傳。
+      // 或者是同一個文字被偵測了兩次（例如 Y 軸和高度近乎完全重合，且 X 座標有 80% 以上重疊）。
+      // 為此，我們執行一次「同行重疊與子字元包含過濾」，將完全被大框包含的小框、或是重複偵測的雜訊直接剔除，
+      // 這保證了最終渲染到 CSS 上的翻譯容器，絕不會出現原圖中那樣「同一個地方疊上下兩個不同詞彙、甚至重複翻譯覆蓋」的混亂場面！
+      const result: TranslationLine[] = [];
+      for (const current of resultBeforeFilter) {
+        let isOverlappedAndSmaller = false;
+        for (const other of resultBeforeFilter) {
+          if (current === other) continue;
+          
+          // 定義 Y 軸與高度是否重合（同行）
+          const yOverlaps = Math.abs(current.y - other.y) < Math.max(current.height, other.height) * 0.5;
+          
+          if (yOverlaps) {
+            // 計算 X 軸重疊份量 (Intersection over Union / Containment)
+            const curLeft = current.x;
+            const curRight = current.x + current.width;
+            const othLeft = other.x;
+            const othRight = other.x + other.width;
+            
+            const overlapLeft = Math.max(curLeft, othLeft);
+            const overlapRight = Math.min(curRight, othRight);
+            
+            if (overlapRight > overlapLeft) {
+              const intersectionWidth = overlapRight - overlapLeft;
+              const curWidth = current.width;
+              
+              // 如果 current 框被 other 框包含超過 75%，且 current 的面積或長度小於 other，
+              // 代表 current 只是 large-text 內部的冗餘局部碎片偵測字詞，必需予以剔除！
+              const containmentRatio = intersectionWidth / curWidth;
+              if (containmentRatio > 0.75 && current.original.length < other.original.length) {
+                isOverlappedAndSmaller = true;
+                break;
+              }
+            }
+          }
+        }
+        if (!isOverlappedAndSmaller) {
+          result.push(current);
+        }
+      }
+
+      console.log(`[過濾] 從未過濾前 ${resultBeforeFilter.length} 行，精細篩除冗餘碎片剩餘 ${result.length} 行。`);
       setTranslations(result);
       setResultSelection(activeSelection);
       setMode("result");

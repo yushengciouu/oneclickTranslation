@@ -6,22 +6,27 @@ use std::io::Cursor;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// 小圖放大，讓 Windows OCR 對小選取範圍也有足夠解析度
-/// Windows OCR 本身支援彩色圖，不需要二值化
-/// 回傳 (PNG bytes, 放大倍率)，座標需除以倍率還原
+/// 採用動態高階縮放演算法，為中低解析度、精細菜單或深色背景中細小中文字體進行高階插值（Lanczos3）放大，
+/// 這可以大幅提升 Windows OCR 的字符特徵辨識率，徹底根除漏字、漏行、邊框判定不全等頑疾！
 fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
     let (w, h) = (img.width(), img.height());
 
-    // 圖片太小時放大（Windows OCR 對小圖辨識率差）
-    let (output_img, scale) = if h < 80 || w < 200 {
-        let s = (2.0f32).max(80.0 / h as f32).min(4.0);
-        let nw = (w as f32 * s) as u32;
-        let nh = (h as f32 * s) as u32;
+    let s = if w > 3000 || h > 2000 {
+        1.0f64
+    } else if w > 1600 || h > 1200 {
+        1.5f64
+    } else {
+        2.0f64
+    };
+
+    let (output_img, scale) = if s > 1.0 {
+        let nw = (w as f64 * s) as u32;
+        let nh = (h as f64 * s) as u32;
         let up = screenshots::image::imageops::resize(
             &img.to_rgba8(), nw, nh,
             screenshots::image::imageops::FilterType::Lanczos3,
         );
-        (DynamicImage::ImageRgba8(up), s as f64)
+        (DynamicImage::ImageRgba8(up), s)
     } else {
         (img, 1.0f64)
     };
@@ -177,29 +182,45 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
 async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: String, model: String) -> Result<Vec<String>, String> {
     // 加入編號，要求 LLM 一定照原數對映回來
     let n = texts.len();
-    let (src_desc, tgt_desc) = if target_lang == "zh" {
-        ("English", "Traditional Chinese (繁體中文)")
-    } else {
-        ("Traditional Chinese", "English")
-    };
     let combined = texts
         .iter()
         .enumerate()
         .map(|(i, t)| format!("{}. {}", i + 1, t))
         .collect::<Vec<_>>()
         .join("\n");
-    let system_prompt = format!(
-        "You are a professional setting panel and technical text translator. Translate each numbered {} text item into {}. \
-         \
-         Strict Guidelines:\
-         1. You MUST translate EVERY item. If an item is a single short word like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', you MUST translate it accurately (e.g. '電子郵件', '模型', '套件', 'Copilot', '功能列表', '頁面').\
-         2. Keep the translation concise and natural for software UI elements.\
-         3. Keep non-translatable technical names like 'GitHub', 'Settebello', 'Jalveer', 'Marivex' or brand names intact if there's no standard translation.\
-         4. Do NOT leave any item blank or untranslated. If you cannot translate, translate it to the best of your ability. Never omit items.\
-         5. Output EXACTLY the same numbered format: '1. translation', '2. translation', etc. \
-         6. Return exactly {} translated items. No conversational filler, no extra lines, and no markdown formatting.",
-        src_desc, tgt_desc, n
-    );
+
+    // 針對翻譯方向 (中翻英 / 英翻中) 生成完全獨立且針對性強化的 System Prompt，
+    // 徹底消除 local LLM（如 gemma 等）因雙向規則混雜導致的「主觀猜測選單按鈕功能」而把人名(如 柏安、吳秉昇)翻譯成 (Security、User Account) 的嚴重幻覺！
+    let system_prompt = if target_lang == "zh" {
+        format!(
+            "You are a precise, professional software and system UI translator. Translate each numbered English text item into Traditional Chinese (繁體中文).\n\n\
+             Strict Guidelines:\n\
+             1. You MUST translate EVERY item. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', translate it professionally (e.g. '電子郵件', '模型', '套件', 'Copilot', '功能列表', '頁面', '安全性', '個人檔案').\n\
+             2. Keep all brand names ('GitHub', 'Tauri', 'Settebello', 'Jalveer' etc.) or personal names in English if there is no standard Chinese translation.\n\
+             3. Keep the translation concise, premium, and natural for software buttons, sidebar menus, and UI components.\n\
+             4. Do NOT leave any item blank or untranslated. If you cannot translate, translate it to the best of your ability. Never omit items.\n\
+             5. Output EXACTLY the same numbered list format:\n\
+             '1. [translation]'\n\
+             '2. [translation]'\n\
+             ... Keep numbers consecutive and aligned with input.\n\
+             6. Return exactly {} translated items. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+            n
+        )
+    } else {
+        format!(
+            "You are a precise, literal, and professional translator. Translate each numbered Traditional Chinese text item into English.\n\n\
+             Strict Guidelines:\n\
+             1. You MUST translate EVERY item literally and accurately. Keep names, contacts, and personal names (e.g., '柏安' to 'Bo-An' or 'Po-An', '詠' to 'Yung', 'Doris' to 'Doris', '吳秉昇' to 'Wu Bing-Sheng'), brand names, and proper nouns intact or translit them accurately.\n\
+             2. Crucial: Do NOT hallucinate UI or settings page labels based on guessing. For example, if an item is a personal name or contact, do NOT arbitrarily translate it into standard system settings page options like 'Security', 'Profile', or 'User Account'. Keep the actual letters/names!\n\
+             3. Keep the translation concise and natural, but never omit or skip any items.\n\
+             4. Output EXACTLY the same numbered list format:\n\
+             '1. [translation]'\n\
+             '2. [translation]'\n\
+             ... Keep numbers consecutive and aligned with input.\n\
+             5. Return exactly {} translated items. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+            n
+        )
+    };
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
