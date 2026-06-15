@@ -423,6 +423,26 @@ function App() {
         let boxW = Math.min(activeSelection.x + activeSelection.width, fx + fw) - boxX;
         if (boxW <= 2) return null;
 
+        // 【極致自適應最小寬度安全保障演算法】：
+        // 解決「Galler y」、「Y u n g」等英文譯文因為原中文選取框（如單字、雙字清單）太窄
+        // 而被迫發生中斷、極醜陋單字內截斷換行（如 Yung 變成 Y \n u \n n \n g）的痛點！
+        let zhCount = 0;
+        let enCount = 0;
+        const cleanTrans = translated[i].trim();
+        for (let cIdx = 0; cIdx < cleanTrans.length; cIdx++) {
+          if (cleanTrans.charCodeAt(cIdx) > 127) {
+            zhCount++;
+          } else {
+            enCount++;
+          }
+        }
+
+        // 推估將該段翻譯完美放入單行所需要的最低安全像素寬度
+        const characterWidthEst = targetLang === "zh"
+          ? (zhCount * 13.5 + enCount * 6.5) // 中文繁體筆劃大，預估單字寬 13.5px
+          : (zhCount * 13.5 + enCount * 6.0); // 英文小寫字母，單字元預估寬 6.0px
+        const safeMinWidth = characterWidthEst + 14; // 加上左右各自少許 padding 的安全寬度
+
         // 【高畫質安全寬度適配】：
         if (targetLang === "en") {
           // 中翻英：英文單字與字元長度通常比中文原文膨脹 1.3 ~ 1.6 倍。
@@ -440,6 +460,10 @@ function App() {
           const paddingBonus = Math.max(16, Math.min(35, boxW * 0.4));
           boxW = Math.min(activeSelection.x + activeSelection.width - boxX, boxW + paddingBonus);
         }
+
+        // 雙重加固：為防單字內截斷，寬度必定大於最小安全寬度。同時允許超出選取區右界最多 35px，提供大氣的單行呼吸空間！
+        const rightMaxLimit = activeSelection.x + activeSelection.width + 35;
+        boxW = Math.max(boxW, Math.min(rightMaxLimit - boxX, safeMinWidth));
 
         const bgColor = sampleBgColor(
           imgEl,
@@ -734,7 +758,11 @@ function App() {
                 color: t.textColor,
                 // 高度特製化文字與排版設定
                 lineHeight: targetLang === "zh" ? 1.35 : 1.25,
-                wordBreak: targetLang === "zh" ? "break-all" : "break-word",
+                // 為解決英文單字被垂直撕裂截斷的痛點（例如 Gallery 變成 Galler\ny），
+                // 英文採用 "normal" (或 "keep-all") 來保持單字完整，絕不硬性於字母間裁斷折行！
+                // 只有中文因為字元間無空格才允許隨意按字元 "break-all" 折行。
+                wordBreak: targetLang === "zh" ? "break-all" : "normal",
+                overflowWrap: targetLang === "zh" ? "anywhere" : "break-word",
                 letterSpacing: targetLang === "zh" ? "0.02em" : "-0.012em",
                 fontWeight: targetLang === "zh" ? 550 : 500,
               }}>
