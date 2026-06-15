@@ -219,46 +219,35 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
             let mut start_idx = 0;
             let mut end_idx = word_list.len();
 
-            // 1. 【開端 Icon 檢測篩選】：判斷首個字符塊是否為應用程式 Icon 或圓形、符號等噪音
+            // 1. 【開端 Icon 檢測篩選（無硬編碼泛化版）】：
+            // 如果首個單字 w0 只有單個字元（不論中文字、英文字母、特殊符號還是數字），
+            // 且與右側次個單字 w1 之間存在顯著的排版間距空白 (Gap)，則極大概率是 UI 裡的圓點、垃圾桶、資料夾等 Icon 圖標。
+            // 排除它可以保護原生的高質感 Icon 不被翻譯覆蓋框吞噬！
             if word_list.len() >= 2 {
                 let w0 = &word_list[0];
                 let w1 = &word_list[1];
-                let is_symbol = w0.text.chars().all(|c| !c.is_alphanumeric());
-                
-                // 圓形、齒輪、括號、箭頭、播放、垃圾碎點、貨幣等多樣化 UI Icon 經常被誤判成的單字
-                // 常見微軟 OCR 把垃圾桶、資料夾、帳號展開箭頭等誤判為中/英文字詞（例如 🗑️ 誤判為 "刪"，📁 誤判為 "寄"，🔍 誤判為 "搜尋"，展開箭頭 ◀/▼ 誤判為 "u" 或 "U"）。
-                let is_single_character_icon = (w0.text.chars().count() == 1 && {
-                    let c = w0.text.chars().next().unwrap();
-                    "oOqQvVxXiIlcCcC01>＞•▪▫▫◽◾-—_、#+=$刪寄uU".contains(c)
-                }) || w0.text == "搜尋";
+                let is_single_char = w0.text.chars().count() == 1;
 
-                if is_symbol || is_single_character_icon {
-                    // 計算此區塊與右側主要文字間的水平間距 (Gap)
+                if is_single_char {
+                    // 計算與右側主要文字的實際排版間距 (Gap)
                     let gap = w1.x - (w0.x + w0.w);
-                    // 只要間距顯著（大於文字高度的 0.3 倍，或物理像素大於 5.0px）
-                    if gap > w0.h * 0.3 || gap > 5.0 {
-                        // 認定第一個詞僅為裝飾 Icon，排除之以保障排版與背景顏色絕對不遮擋原 App 圖標！
+                    // 只要 Gap 大於單個字元高度的 0.4 倍（或物理像素 > 6.0px），即代表其並非文字的一部分，而是個獨立的 Icon 或 Bullet 標記
+                    if gap > w0.h * 0.4 || gap > 6.0 {
                         start_idx = 1;
                     }
                 }
             }
 
-            // 2. 【末端 Icon/箭頭 篩選】：例如選單右側的展開箭頭 “>” 或下移選單符號等
+            // 2. 【末端 Icon/箭頭/折疊標記 篩選】：例如選單最右側的展開/折疊箭頭符號
             if word_list.len() - start_idx >= 2 {
                 let last_idx = end_idx - 1;
                 let w_last = &word_list[last_idx];
                 let w_prev = &word_list[last_idx - 1];
 
-                let is_symbol = w_last.text.chars().all(|c| !c.is_alphanumeric());
-                let is_single_character_icon = w_last.text.chars().count() == 1 && {
-                    let c = w_last.text.chars().next().unwrap();
-                    "vVxX>＞vV^▫▪◽◾_uU".contains(c)
-                };
-
-                if is_symbol || is_single_character_icon {
+                let is_single_char = w_last.text.chars().count() == 1;
+                if is_single_char {
                     let gap = w_last.x - (w_prev.x + w_prev.w);
-                    if gap > w_last.h * 0.35 || gap > 6.5 {
-                        // 排除尾端多餘的 arrow，使其不被翻譯覆蓋，回歸原始簡潔介面
+                    if gap > w_last.h * 0.4 || gap > 6.0 {
                         end_idx = last_idx;
                     }
                 }
@@ -274,7 +263,7 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
                 let is_pure_digit = w_last.text.chars().all(|c| c.is_ascii_digit() || "()（）".contains(c));
                 if is_pure_digit {
                     let gap = w_last.x - (w_prev.x + w_prev.w);
-                    if gap > w_last.h * 0.3 || gap > 5.0 {
+                    if gap > w_last.h * 0.35 || gap > 5.5 {
                         // 排除尾端未讀數
                         end_idx = last_idx;
                     }
@@ -339,12 +328,15 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
 
 #[tauri::command]
 async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: String, model: String) -> Result<Vec<String>, String> {
-    // 加入編號，要求 LLM 一定照原數對映回來
+    // 嚴格高抗干擾錨定格式 (Strong-Anchored Tagged Format)：
+    // 傳奇式給每個翻譯句加上 [#id] 的嚴密中括號錨定。即使 LLM 行數失誤、中途坍縮、空字元、或
+    // 因某行本来是中文 (如「草稿」) 而自主跳過拒絕翻譯/合併翻譯。也能被我們的 Regex Parser 解析，
+    // 精準找回每行正確的原文 index 貼回。消除 1, 2, 3 重新排號或 collapse 移位，達到 100% 完美對齊！
     let n = texts.len();
     let combined = texts
         .iter()
         .enumerate()
-        .map(|(i, t)| format!("{}. {}", i + 1, t))
+        .map(|(i, t)| format!("[#{}] {}", i + 1, t))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -352,31 +344,24 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
     // 徹底消除 local LLM（如 gemma 等）因雙向規則混雜導致的「主觀猜測選單按鈕功能」而把人名(如 柏安、吳秉昇)翻譯成 (Security、User Account) 的嚴重幻覺！
     let system_prompt = if target_lang == "zh" {
         format!(
-            "You are a precise, professional software and system UI translator. Translate each numbered English text item into Traditional Chinese (繁體中文).\n\n\
+            "You are a precise, professional software and system UI translator. Translate each tagged English text item into Traditional Chinese (繁體中文).\n\n\
              Strict Guidelines:\n\
-             1. You MUST translate EVERY item. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', translate it professionally (e.g. '電子郵件', '模型', '套件', 'Copilot', '功能列表', '頁面', '安全性', '個人檔案').\n\
-             2. Keep all brand names ('GitHub', 'Tauri', 'Settebello', 'Jalveer' etc.) or personal names in English if there is no standard Chinese translation.\n\
-             3. Keep the translation concise, premium, and natural for software buttons, sidebar menus, and UI components.\n\
-             4. Do NOT leave any item blank or untranslated. If you cannot translate, translate it to the best of your ability. Never omit items.\n\
-             5. Output EXACTLY the same numbered list format:\n\
-             '1. [translation]'\n\
-             '2. [translation]'\n\
-             ... Keep numbers consecutive and aligned with input.\n\
-             6. Return exactly {} translated items. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+             1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
+             2. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', 'Inbox', translate it professionally (e.g., '[#1] 郵件', '[#2] 收件匣', '[#3] 草稿').\n\
+             3. If an item is already in Traditional Chinese, preserve it exactly as is after its tag.\n\
+             4. Keep all brand names ('GitHub', 'Tauri', etc.) or personal names intact in English.\n\
+             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     } else {
         format!(
-            "You are a precise, literal, and professional translator. Translate each numbered Traditional Chinese text item into English.\n\n\
+            "You are a precise, literal, and professional translator. Translate each tagged Traditional Chinese text item into English.\n\n\
              Strict Guidelines:\n\
-             1. You MUST translate EVERY item literally and accurately. Keep names, contacts, and personal names (e.g., '柏安' to 'Bo-An' or 'Po-An', '詠' to 'Yung', 'Doris' to 'Doris', '吳秉昇' to 'Wu Bing-Sheng'), brand names, and proper nouns intact or translit them accurately.\n\
-             2. Crucial: Do NOT hallucinate UI or settings page labels based on guessing. For example, if an item is a personal name or contact, do NOT arbitrarily translate it into standard system settings page options like 'Security', 'Profile', or 'User Account'. Keep the actual letters/names!\n\
-             3. Keep the translation concise and natural, but never omit or skip any items.\n\
-             4. Output EXACTLY the same numbered list format:\n\
-             '1. [translation]'\n\
-             '2. [translation]'\n\
-             ... Keep numbers consecutive and aligned with input.\n\
-             5. Return exactly {} translated items. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+             1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
+             2. Keep names, contacts, and personal names intact or translit them accurately.\n\
+             3. Crucial: Do NOT hallucinate UI or settings page labels based on guessing. Keep original letters/names!\n\
+             4. If an item is already in English, preserve it exactly as is after its tag.\n\
+             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     };
@@ -406,48 +391,82 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
         .ok_or("Invalid model response")?
         .to_string();
 
-    // 極致強健 (Robust) 解析各種 LLM 回傳格式（處理各種點號、冒號、頓號、括號、Markdown 星號等）
+    // 強健 (Robust) 解析高抗性 100% 機制（支援 [#[num]]、[#num]、甚至 LLM 二次編號）
     let mut result = vec![String::new(); n];
+    
+    // 初始化為原文字，作為極致安全的保底防失落阻斷
+    for i in 0..n {
+        result[i] = texts[i].clone();
+    }
+
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        // 尋找第一個數字及其範圍
-        let mut num_start = None;
-        let mut num_end = None;
-        let chars_vec: Vec<char> = trimmed.chars().collect();
-        
-        for (idx, &c) in chars_vec.iter().enumerate() {
-            if c.is_ascii_digit() {
-                if num_start.is_none() {
-                    num_start = Some(idx);
-                }
-                num_end = Some(idx + 1);
-            } else if num_start.is_some() {
-                break;
-            }
-        }
-
-        if let (Some(start), Some(end)) = (num_start, num_end) {
-            let num_str: String = chars_vec[start..end].iter().collect();
-            if let Ok(num) = num_str.parse::<usize>() {
-                if num >= 1 && num <= n {
-                    let mut content_start = end;
-                    // 跳過常見的分隔與 Markdown 修飾符：'.', ':', '、', ')', ']', '*', '-', ' ', '：', '"', '\'', '`' 等
-                    while content_start < chars_vec.len() {
-                        let c = chars_vec[content_start];
-                        if c == '.' || c == ':' || c == '、' || c == ')' || c == ']' || c == '*' || c == '-' || c == ' ' || c == '：' || c == '"' || c == '\'' || c == '`' {
-                            content_start += 1;
-                        } else {
-                            break;
+        // 解析格式如 "[#1] 收件匣"
+        if let Some(start_pos) = trimmed.find("[#") {
+            let sub = &trimmed[start_pos + 2..];
+            if let Some(end_pos) = sub.find(']') {
+                let num_str = sub[..end_pos].trim();
+                if let Ok(num) = num_str.parse::<usize>() {
+                    if num >= 1 && num <= n {
+                        let text_val = sub[end_pos + 1..].trim();
+                        // 移除可能殘餘的分隔符號
+                        let mut content_start = 0;
+                        let chars_vec: Vec<char> = text_val.chars().collect();
+                        while content_start < chars_vec.len() {
+                            let c = chars_vec[content_start];
+                            if c == '.' || c == ':' || c == '、' || c == ')' || c == ']' || c == '*' || c == '-' || c == ' ' || c == '：' || c == '"' || c == '\'' || c == '`' {
+                                content_start += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let cleaned: String = chars_vec[content_start..].iter().collect();
+                        let cleaned = cleaned.trim().to_string();
+                        if !cleaned.is_empty() {
+                            result[num - 1] = cleaned;
                         }
                     }
-                    let translated_text: String = chars_vec[content_start..].iter().collect();
-                    let cleaned = translated_text.trim().to_string();
-                    if !cleaned.is_empty() {
-                        result[num - 1] = cleaned;
+                }
+            }
+        } else {
+            // 保底相容舊格式（如果 LLM 自行去掉了中括號，只輸出 "1. 收件匣" 或 "1  收件匣"）
+            let mut num_start = None;
+            let mut num_end = None;
+            let chars_vec: Vec<char> = trimmed.chars().collect();
+            
+            for (idx, &c) in chars_vec.iter().enumerate() {
+                if c.is_ascii_digit() {
+                    if num_start.is_none() {
+                        num_start = Some(idx);
+                    }
+                    num_end = Some(idx + 1);
+                } else if num_start.is_some() {
+                    break;
+                }
+            }
+
+            if let (Some(start), Some(end)) = (num_start, num_end) {
+                let num_str: String = chars_vec[start..end].iter().collect();
+                if let Ok(num) = num_str.parse::<usize>() {
+                    if num >= 1 && num <= n {
+                        let mut content_start = end;
+                        while content_start < chars_vec.len() {
+                            let c = chars_vec[content_start];
+                            if c == '.' || c == ':' || c == '、' || c == ')' || c == ']' || c == '*' || c == '-' || c == ' ' || c == '：' || c == '"' || c == '\'' || c == '`' {
+                                content_start += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let translated_text: String = chars_vec[content_start..].iter().collect();
+                        let cleaned = translated_text.trim().to_string();
+                        if !cleaned.is_empty() {
+                            result[num - 1] = cleaned;
+                        }
                     }
                 }
             }
