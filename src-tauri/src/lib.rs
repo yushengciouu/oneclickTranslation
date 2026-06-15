@@ -141,30 +141,128 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
         let mut ocr_lines = Vec::new();
         let lines = result.Lines().map_err(|e| e.to_string())?;
         let line_count = lines.Size().map_err(|e| e.to_string())? as u32;
+
+        struct WordData {
+            text: String,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+        }
+
         for i in 0..line_count {
             let line = lines.GetAt(i).map_err(|e| e.to_string())?;
-            let text = line.Text().map_err(|e| e.to_string())?.to_string();
-            if text.trim().is_empty() {
+            let raw_text = line.Text().map_err(|e| e.to_string())?.to_string();
+            if raw_text.trim().is_empty() {
                 continue;
             }
             let words = line.Words().map_err(|e| e.to_string())?;
             let word_count = words.Size().map_err(|e| e.to_string())? as u32;
+            
+            // 讀取該行所有獨立文字塊 (words)，以便精細辨識與移除 Icon 的干擾
+            let mut word_list = Vec::new();
+            for j in 0..word_count {
+                let word = words.GetAt(j).map_err(|e| e.to_string())?;
+                let b = word.BoundingRect().map_err(|e| e.to_string())?;
+                let w_text = word.Text().map_err(|e| e.to_string())?.to_string();
+                word_list.push(WordData {
+                    text: w_text,
+                    x: b.X,
+                    y: b.Y,
+                    w: b.Width,
+                    h: b.Height,
+                });
+            }
+
+            if word_list.is_empty() {
+                continue;
+            }
+
+            let mut start_idx = 0;
+            let mut end_idx = word_list.len();
+
+            // 1. 【開端 Icon 檢測篩選】：判斷首個字符塊是否為應用程式 Icon 或圓形、符號等噪音
+            if word_list.len() >= 2 {
+                let w0 = &word_list[0];
+                let w1 = &word_list[1];
+                let is_symbol = w0.text.chars().all(|c| !c.is_alphanumeric());
+                
+                // 圓形、齒輪、括號、箭頭、播放、垃圾碎點、貨幣等多樣化 UI Icon 經常被誤判成的單字
+                let is_single_character_icon = w0.text.chars().count() == 1 && {
+                    let c = w0.text.chars().next().unwrap();
+                    "oOqQvVxXiIlcCcC01>＞•▪▫▫◽◾-—_、#+=$".contains(c)
+                };
+
+                if is_symbol || is_single_character_icon {
+                    // 計算此區塊與右側主要文字間的水平間距 (Gap)
+                    let gap = w1.x - (w0.x + w0.w);
+                    // 只要間距顯著（大於文字高度的 0.35 倍，或物理像素大於 6.5px）
+                    if gap > w0.h * 0.35 || gap > 6.5 {
+                        // 認定第一個詞僅為裝飾 Icon，排除之以保障排版與背景顏色絕對不遮擋原 App 圖標！
+                        start_idx = 1;
+                    }
+                }
+            }
+
+            // 2. 【末端 Icon/箭頭 篩選】：例如選單右側的展開箭頭 “>” 或下移選單符號等
+            if word_list.len() - start_idx >= 2 {
+                let last_idx = word_list.len() - 1;
+                let w_last = &word_list[last_idx];
+                let w_prev = &word_list[last_idx - 1];
+
+                let is_symbol = w_last.text.chars().all(|c| !c.is_alphanumeric());
+                let is_single_character_icon = w_last.text.chars().count() == 1 && {
+                    let c = w_last.text.chars().next().unwrap();
+                    "vVxX>＞vV^▫▪◽◾_".contains(c)
+                };
+
+                if is_symbol || is_single_character_icon {
+                    let gap = w_last.x - (w_prev.x + w_prev.w);
+                    if gap > w_last.h * 0.35 || gap > 6.5 {
+                        // 排除尾端多餘的 arrow，使其不被翻譯覆蓋，回歸原始簡潔介面
+                        end_idx = last_idx;
+                    }
+                }
+            }
+
+            // 3. 重組排除 Icon 後的淨化文字
+            let clean_text = if start_idx == 0 && end_idx == word_list.len() {
+                raw_text
+            } else if start_idx >= end_idx {
+                // 如果整行都成了 Icon 被排光了，代表可能純粹是雜訊，予以保留正常流程
+                raw_text
+            } else {
+                let segment = &word_list[start_idx..end_idx];
+                if ocr_lang.contains("zh") || ocr_lang.contains("Z") {
+                    segment.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("")
+                } else {
+                    segment.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                }
+            };
+
+            let clean_trimmed = clean_text.trim();
+            if clean_trimmed.is_empty() {
+                continue;
+            }
+
+            // 4. 重算收縮後的純文字 Bounding Box 座標
             let mut min_x = f32::MAX;
             let mut min_y = f32::MAX;
             let mut max_x = f32::MIN;
             let mut max_y = f32::MIN;
-            for j in 0..word_count {
-                let word = words.GetAt(j).map_err(|e| e.to_string())?;
-                let b = word.BoundingRect().map_err(|e| e.to_string())?;
-                min_x = min_x.min(b.X);
-                min_y = min_y.min(b.Y);
-                max_x = max_x.max(b.X + b.Width);
-                max_y = max_y.max(b.Y + b.Height);
+
+            for j in start_idx..end_idx {
+                let w = &word_list[j];
+                min_x = min_x.min(w.x);
+                min_y = min_y.min(w.y);
+                max_x = max_x.max(w.x + w.w);
+                max_y = max_y.max(w.y + w.h);
             }
+
             if min_x < f32::MAX {
                 // 座標除以放大倍率，還原為原始圖片座標
                 ocr_lines.push(OcrLine {
-                    text,
+                    text: clean_trimmed.to_string(),
                     x: min_x as f64 / scale,
                     y: min_y as f64 / scale,
                     width: (max_x - min_x) as f64 / scale,
