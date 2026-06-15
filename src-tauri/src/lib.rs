@@ -226,19 +226,59 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
         .ok_or("Invalid model response")?
         .to_string();
 
-    // 解析 "N. text" 格式，按編號填入對應位置
+    // 極致強健 (Robust) 解析各種 LLM 回傳格式（處理各種點號、冒號、頓號、括號、Markdown 星號等）
     let mut result = vec![String::new(); n];
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(dot_pos) = trimmed.find(". ") {
-            let num_str = &trimmed[..dot_pos];
-            if num_str.chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(num) = num_str.parse::<usize>() {
-                    if num >= 1 && num <= n {
-                        result[num - 1] = trimmed[dot_pos + 2..].trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // 尋找第一個數字及其範圍
+        let mut num_start = None;
+        let mut num_end = None;
+        let chars_vec: Vec<char> = trimmed.chars().collect();
+        
+        for (idx, &c) in chars_vec.iter().enumerate() {
+            if c.is_ascii_digit() {
+                if num_start.is_none() {
+                    num_start = Some(idx);
+                }
+                num_end = Some(idx + 1);
+            } else if num_start.is_some() {
+                break;
+            }
+        }
+
+        if let (Some(start), Some(end)) = (num_start, num_end) {
+            let num_str: String = chars_vec[start..end].iter().collect();
+            if let Ok(num) = num_str.parse::<usize>() {
+                if num >= 1 && num <= n {
+                    let mut content_start = end;
+                    // 跳過常見的分隔與 Markdown 修飾符：'.', ':', '、', ')', ']', '*', '-', ' ', '：', '"', '\'', '`' 等
+                    while content_start < chars_vec.len() {
+                        let c = chars_vec[content_start];
+                        if c == '.' || c == ':' || c == '、' || c == ')' || c == ']' || c == '*' || c == '-' || c == ' ' || c == '：' || c == '"' || c == '\'' || c == '`' {
+                            content_start += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let translated_text: String = chars_vec[content_start..].iter().collect();
+                    let cleaned = translated_text.trim().to_string();
+                    if !cleaned.is_empty() {
+                        result[num - 1] = cleaned;
                     }
                 }
             }
+        }
+    }
+
+    // 雙重安全保底機制：若有任何一行未能成功解析（依然為空），
+    // 則自動填入「對應原文」，杜絕因格式失誤造成空白、沒覆蓋、或漏譯的視覺破孔！
+    for i in 0..n {
+        if result[i].is_empty() {
+            result[i] = texts[i].clone();
         }
     }
     Ok(result)
