@@ -393,21 +393,20 @@ function App() {
       const scaleX = imgEl.naturalWidth / window.innerWidth;
       const scaleY = imgEl.naturalHeight / window.innerHeight;
 
-      // 絕不使用會隨邊界裁截而導致座標平移失真（防偏移痛點）的額外 Padding。
-      // 當選取框貼近螢幕 0,0 邊界時，防 Padding 的裁切位置會發生非線性偏移。
-      // 這裡直接對齊 activeSelection 進行嚴格裁切，徹底根除偏位問題。
-      const nativeRect: Rect = {
-        x: Math.round(activeSelection.x * scaleX),
+      // 【根本解法：X 軸展開至全螢幕寬度，只用 Y 軸過濾行數】
+      // 問題根源：若用戶框選很窄（例如只選 30px 寬），傳給 OCR 的裁切圖也很窄，
+      // OCR 只看到每行文字的殘缺片段（如 "Sent Backup" 有 120px 寬只能看到 30px），
+      // 無法辨識不完整的字，導致漏字、辨識失敗。框越大品質越好，就是這個原因。
+      // 解決方案：裁切時 X 軸固定擴展到全螢幕寬，讓 OCR 永遠能看到完整的一整行文字。
+      // Y 軸仍對準使用者的選取範圍（± 少量安全 padding），最後再用 Y 軸座標過濾出選取區內的行。
+      const fullWidthRect: Rect = {
+        x: 0,
         y: Math.round(activeSelection.y * scaleY),
-        width: Math.round(activeSelection.width * scaleX),
+        width: imgEl.naturalWidth,
         height: Math.round(activeSelection.height * scaleY),
       };
-      // 此處實施「零失真自適應邊緣填充技術 (Adaptive Padding)」，
-      // 當選取框極度貼近文字邊界（如單獨框選小選單「查詢系統」、「專案」）時，
-      // Windows OCR 的卷積核心會被物理剪裁邊框嚴重干擾而直接失敗。
-      // 我們在 React Canvas 裁剪階段就對四周預留 32 像素的安全襯墊緩衝，並在最終渲染時精確減除。
       const padAmount = 32;
-      const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, nativeRect, padAmount);
+      const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, fullWidthRect, padAmount);
 
       // Step 1：Windows OCR 取得每行文字與精確座標
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
@@ -440,21 +439,23 @@ function App() {
       //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
       const resultBeforeFilter = ocrLines.map((line, i) => {
         // 先減去 padX/padY 還原為 cropped 之前無 Padding 的純物理座標，再除以 scaleX 換算為 logical pixels！
-        const fx = activeSelection.x + (line.x - padX) / scaleX;
+        // 注意：cropRect 的 X 起始為 0（全螢幕寬），所以 fx 直接是絕對螢幕座標。
+        const fx = (line.x - padX) / scaleX;
         const fy = activeSelection.y + (line.y - padY) / scaleY;
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;
 
-        // 【安全容偏差過濾機制】：
-        // 為了支援使用者在極窄微調選取、或是手抖偏移拉選時亦能點擊辨識，
-        // 只要偵測到的文字框與選取範圍有交集，或文字框中點在稍微寬鬆的選取邊界內即可！
-        const centerX = fx + fw / 2;
+        // 【純 Y 軸過濾 + X 軸以用戶選取範圍為限】：
+        // 只要這行文字的 Y 中心落在用戶的選取 Y 範圍內（加少量容差），就納入翻譯結果。
+        // X 軸：文字必須與用戶選取的 X 範圍有交集（寬容 25px），確保只翻譯用戶關心的欄位。
         const centerY = fy + fh / 2;
-        const marginX = Math.max(25, fw * 0.4); // 給與橫向 25px 或字寬 40% 的容偏差
-        const marginY = Math.max(15, fh * 0.4); // 給與縱向 15px 或字高 40% 的容偏差
-        const insideX = centerX >= activeSelection.x - marginX && centerX <= activeSelection.x + activeSelection.width + marginX;
-        const insideY = centerY >= activeSelection.y - marginY && centerY <= activeSelection.y + activeSelection.height + marginY;
-        if (!insideX || !insideY) return null;
+        const marginY = Math.max(12, fh * 0.3);
+        if (centerY < activeSelection.y - marginY || centerY > activeSelection.y + activeSelection.height + marginY) return null;
+
+        // X 軸交集判斷：文字框右邊 > 選取框左邊 AND 文字框左邊 < 選取框右邊（加 25px 容差）
+        const selLeft = activeSelection.x - 25;
+        const selRight = activeSelection.x + activeSelection.width + 25;
+        if (fx + fw < selLeft || fx > selRight) return null;
 
         // 跳過 LLM 沒有翻譯到的行（行數不對齊時）
         if (!translated[i]?.trim()) return null;
