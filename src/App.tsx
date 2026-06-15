@@ -226,17 +226,49 @@ function contrastColor(bg: string): string {
   return lum > 0.5 ? "#000000" : "#ffffff";
 }
 
-function cropImage(src: string, rect: Rect): Promise<string> {
+function cropImage(src: string, rect: Rect, padding = 32): Promise<{ dataUrl: string; padX: number; padY: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
-      canvas.width = rect.width;
-      canvas.height = rect.height;
+      // 左右與上下各自加上 padding 像素的高品質 Quiet Zone
+      const targetW = rect.width + padding * 2;
+      const targetH = rect.height + padding * 2;
+      canvas.width = targetW;
+      canvas.height = targetH;
       const ctx = canvas.getContext("2d");
       if (!ctx) { reject(new Error("No canvas context")); return; }
-      ctx.drawImage(img, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
-      resolve(canvas.toDataURL("image/png"));
+      
+      // 1. 先用圖片裁剪中心外圍最左上角像素填充畫布背景，防止黑/白背景色突兀
+      try {
+        const tempCanvas = document.createElement("canvas");
+        tempCanvas.width = 1;
+        tempCanvas.height = 1;
+        const tempCtx = tempCanvas.getContext("2d");
+        if (tempCtx) {
+          tempCtx.drawImage(img, rect.x, rect.y, 1, 1, 0, 0, 1, 1);
+          const pixel = tempCtx.getImageData(0, 0, 1, 1).data;
+          ctx.fillStyle = `rgb(${pixel[0]},${pixel[1]},${pixel[2]})`;
+        } else {
+          ctx.fillStyle = "#ffffff";
+        }
+      } catch {
+        ctx.fillStyle = "#ffffff";
+      }
+      ctx.fillRect(0, 0, targetW, targetH);
+
+      // 2. 將裁剪文字精確畫在畫布正中央（四周各有 32 像素的安全襯墊）
+      ctx.drawImage(
+        img,
+        rect.x, rect.y, rect.width, rect.height, // 來源 crop
+        padding, padding, rect.width, rect.height // 目的（帶有 32px 襯墊的中央區域）
+      );
+      
+      resolve({
+        dataUrl: canvas.toDataURL("image/png"),
+        padX: padding,
+        padY: padding,
+      });
     };
     img.onerror = reject;
     img.src = src;
@@ -370,7 +402,12 @@ function App() {
         width: Math.round(activeSelection.width * scaleX),
         height: Math.round(activeSelection.height * scaleY),
       };
-      const cropped = await cropImage(activeScreenshot, nativeRect);
+      // 此處實施「零失真自適應邊緣填充技術 (Adaptive Padding)」，
+      // 當選取框極度貼近文字邊界（如單獨框選小選單「查詢系統」、「專案」）時，
+      // Windows OCR 的卷積核心會被物理剪裁邊框嚴重干擾而直接失敗。
+      // 我們在 React Canvas 裁剪階段就對四周預留 32 像素的安全襯墊緩衝，並在最終渲染時精確減除。
+      const padAmount = 32;
+      const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, nativeRect, padAmount);
 
       // Step 1：Windows OCR 取得每行文字與精確座標
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
@@ -398,12 +435,13 @@ function App() {
       console.log(`[LLM] 翻譯語言為 ${targetLang}，接收了 ${texts.length} 行，返回了 ${translated.length} 行譯文:`);
       console.table(ocrLines.map((l, idx) => ({ 原文: l.text, 譯文: translated[idx] || "（解析失敗/未返回）" })));
 
-      // Step 3：座標換算（OCR 回傳的是相對於 cropped 裁切圖片的原生像素）
+      // Step 3：座標換算（OCR 回傳的是相對於 cropped 帶有 padX/padY 安全緩衝的原生像素）
       //         因為裁切使用了絕對對齊的 activeSelection（無 Pad 偏移），
       //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
       const resultBeforeFilter = ocrLines.map((line, i) => {
-        const fx = activeSelection.x + line.x / scaleX;
-        const fy = activeSelection.y + line.y / scaleY;
+        // 先減去 padX/padY 還原為 cropped 之前無 Padding 的純物理座標，再除以 scaleX 換算為 logical pixels！
+        const fx = activeSelection.x + (line.x - padX) / scaleX;
+        const fy = activeSelection.y + (line.y - padY) / scaleY;
         const fw = line.width / scaleX;
         const fh = line.height / scaleY;
 
@@ -735,10 +773,10 @@ function App() {
         // clipping container：嚴格限制在選取範圍，overflow hidden
         <div style={{
           position: "absolute",
-          left: resultSelection.x,
-          top: resultSelection.y,
-          width: resultSelection.width,
-          height: resultSelection.height,
+          left: resultSelection.x - 30, // 左右與上下給予充足的溢位溢出緩衝區，杜絕部分被微調加寬加高的翻譯方塊（尤其短字）被 Clipping 容器直接裁截掉、而露出原圖的視覺瑕疵！
+          top: resultSelection.y - 15,
+          width: resultSelection.width + 60,
+          height: resultSelection.height + 30,
           overflow: "hidden",
           pointerEvents: "none",
         }}>
@@ -749,8 +787,8 @@ function App() {
             const paddingOffset = 1.5; 
             return (
               <div key={i} className="translation-box" title={t.translated} style={{
-                left: t.x - resultSelection.x - paddingOffset,
-                top: t.y - resultSelection.y - paddingOffset,
+                left: t.x - resultSelection.x + 30 - paddingOffset,
+                top: t.y - resultSelection.y + 15 - paddingOffset,
                 width: t.width + paddingOffset * 2,
                 minHeight: t.height + paddingOffset * 2, // 既設 minHeight 避免單詞折行蓋不住，又限制高度差
                 fontSize: dynamicFontSize,

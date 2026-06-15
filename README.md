@@ -47,11 +47,24 @@ npm run tauri dev
 
 同時啟動 Vite 前端開發伺服器與 Tauri 桌面應用程式視窗。
 
-### 建置正式版本
+### 🛠️ 正式建置打包指令 (Production Build)
+
+當開發完成需要打包成 Windows 獨立安裝檔（如 `.msi`、`.exe` 二進位檔）時，在專案目錄下執行以下指令：
 
 ```bash
+# 使用 npm 呼叫 tauri 進行正式打包建置
 npm run tauri build
 ```
+
+或使用 `npx` 執行：
+
+```bash
+npx tauri build
+```
+
+> **💡 打包小提示：**
+> 1. 建置完成的安裝檔，會輸出在：`src-tauri/target/release/bundle/nsis/` 或 `src-tauri/target/release/bundle/msi/` 目錄中。
+> 2. 這是 Windows 本地編譯，首次建置會自動拉取 Rust 相關相依套件，需稍加等待。
 
 ---
 

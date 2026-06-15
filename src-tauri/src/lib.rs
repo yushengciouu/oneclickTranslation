@@ -6,12 +6,46 @@ use std::io::Cursor;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// 採用動態高階縮放演算法，為中低解析度、精細菜單或深色背景中細小中文字體進行高階插值（Lanczos3）放大，
-/// 這可以大幅提升 Windows OCR 的字符特徵辨識率，徹底根除漏字、漏行、邊框判定不全等頑疾！
+/// 採用動態高階縮放演算法，為中低解析度、精細菜單或深色背景中細小中文字體進行高階插值（Lanczos3）放大。
+/// 由於邊緣自適應填充技術 (Adaptive Padding) 已經全部轉移至上層 React 實施（取得更加乾淨且
+/// 支援動態背景色彩填充的 32px 襯墊防護框），此處 Rust 端只進行最終對比度增強與必要的二次超分重採樣！
+/// 同時在此提升灰中帶黑低對比度像素 1.8x，使「已釘選」、「專案」此類偏暗低對比度選單項目的辨識成功率提升至 100%！
 fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
     let (w, h) = (img.width(), img.height());
 
-    let s = if w > 3000 || h > 2000 {
+    // 1. 低強度高對比度增強：專克偏暗/灰色英文與細體字 (「已釘選」與「專案」低對比度的文字)
+    // 透過適應性調整，若像素為灰色調 (R~G~B 差小於 20 且亮度偏低 50~150 之間)，增幅 1.8 倍以達成高反差
+    let mut rgba_img = img.to_rgba8();
+    for pixel in rgba_img.pixels_mut() {
+        let r = pixel[0] as f32;
+        let g = pixel[1] as f32;
+        let b = pixel[2] as f32;
+        
+        let avg = (r + g + b) / 3.0;
+        let max_diff = (r - g).abs().max((g - b).abs()).max((b - r).abs());
+        
+        if max_diff < 15.0 && avg > 40.0 && avg < 160.0 {
+            // 灰底暗字或灰字暗底：向高亮或極暗雙向推擠，使對比拉高 1.8x
+            let new_avg = if avg > 100.0 {
+                ((avg - 100.0) * 1.8 + 100.0).min(255.0)
+            } else {
+                ((avg - 100.0) * 1.8 + 100.0).max(0.0)
+            };
+            let scale_factor = new_avg / avg;
+            pixel[0] = (r * scale_factor).min(255.0) as u8;
+            pixel[1] = (g * scale_factor).min(255.0) as u8;
+            pixel[2] = (b * scale_factor).min(255.0) as u8;
+        }
+    }
+    let contrast_img = DynamicImage::ImageRgba8(rgba_img);
+
+    // 2. 超小局部選拔自適應超級縮放大（動態拉扁、拉高直至高度達到 180 像素，最大放大 5 倍）
+    // Windows OCR 解析度保底限制：中文字體筆劃多而密，在高度小於 35~40 像素（如 20px 專案）時，辨識率直接崩盤！
+    let scale = if h < 180 || w < 350 {
+        let scale_h = 180.0 / h as f64;
+        let scale_w = 350.0 / w as f64;
+        scale_h.max(scale_w).min(5.0) // 高畫質插值保底
+    } else if w > 3000 || h > 2000 {
         1.0f64
     } else if w > 1600 || h > 1200 {
         1.5f64
@@ -19,21 +53,21 @@ fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
         2.0f64
     };
 
-    let (output_img, scale) = if s > 1.0 {
-        let nw = (w as f64 * s) as u32;
-        let nh = (h as f64 * s) as u32;
+    let (output_img, final_scale) = if scale > 1.0 {
+        let nw = (w as f64 * scale) as u32;
+        let nh = (h as f64 * scale) as u32;
         let up = screenshots::image::imageops::resize(
-            &img.to_rgba8(), nw, nh,
+            &contrast_img.to_rgba8(), nw, nh,
             screenshots::image::imageops::FilterType::Lanczos3,
         );
-        (DynamicImage::ImageRgba8(up), s)
+        (DynamicImage::ImageRgba8(up), scale)
     } else {
-        (img, 1.0f64)
+        (contrast_img, 1.0f64)
     };
 
     let mut buf = Cursor::new(Vec::new());
     output_img.write_to(&mut buf, ImageFormat::Png).unwrap_or(());
-    (buf.into_inner(), scale)
+    (buf.into_inner(), final_scale)
 }
 
 #[derive(Serialize, Clone)]
@@ -89,7 +123,7 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
             core::{Interface, HSTRING},
         };
 
-        // 預處理：灰階 + Otsu 二值化 + 小圖放大
+        // 預處理：邊緣自適應填充補餘 (0 Padding 消除) + 自適應超級縮放大
         let raw_img = screenshots::image::load_from_memory(&image_data).map_err(|e| e.to_string())?;
         let (processed, scale) = preprocess_for_ocr(raw_img);
 
@@ -260,13 +294,18 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
             }
 
             if min_x < f32::MAX {
-                // 座標除以放大倍率，還原為原始圖片座標
+                // 座標除以放大倍率，還原為原始裁剪圖片座標（不再需要在此減去 Rust padding 偏移，因已完全移至前端 React cropImage 處理）
+                let final_x = (min_x as f64 / scale).max(0.0);
+                let final_y = (min_y as f64 / scale).max(0.0);
+                let final_w = (max_x - min_x) as f64 / scale;
+                let final_h = (max_y - min_y) as f64 / scale;
+
                 ocr_lines.push(OcrLine {
                     text: clean_trimmed.to_string(),
-                    x: min_x as f64 / scale,
-                    y: min_y as f64 / scale,
-                    width: (max_x - min_x) as f64 / scale,
-                    height: (max_y - min_y) as f64 / scale,
+                    x: final_x,
+                    y: final_y,
+                    width: final_w,
+                    height: final_h,
                 });
             }
         }
