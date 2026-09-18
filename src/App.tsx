@@ -691,26 +691,6 @@ function App() {
             <div className="settings-modal" onClick={e => e.stopPropagation()}>
               <h3>設定 / Settings</h3>
               <label>
-                API URL
-                <input
-                  type="text"
-                  value={draftSettings.apiUrl}
-                  onChange={e => setDraftSettings(s => ({ ...s, apiUrl: e.target.value }))}
-                  placeholder="http://192.168.x.x:8001"
-                  spellCheck={false}
-                />
-              </label>
-              <label>
-                Model
-                <input
-                  type="text"
-                  value={draftSettings.model}
-                  onChange={e => setDraftSettings(s => ({ ...s, model: e.target.value }))}
-                  placeholder="gemma-4:31B"
-                  spellCheck={false}
-                />
-              </label>
-              <label>
                 自訂快捷鍵 / Custom Shortcut
                 <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
                   <input
