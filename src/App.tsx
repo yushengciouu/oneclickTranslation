@@ -6,18 +6,21 @@ import "./App.css";
 type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
 type Lang = "zh" | "en";
 type TransDir = "zh-en" | "en-zh";
+type OcrEngine = "windows" | "offline";
 
 const SETTINGS_KEY = "screen-translator-settings";
 const DEFAULT_SETTINGS = {
   apiUrl: "http://192.168.39.143:8001",
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
+  ocrEngine: "windows" as OcrEngine,
 };
 
 interface AppSettings {
   apiUrl: string;
   model: string;
   shortcut: string;
+  ocrEngine: OcrEngine;
 }
 
 function loadSettings(): AppSettings {
@@ -288,6 +291,7 @@ function App() {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(loadSettings);
   const [isRecording, setIsRecording] = useState(false);
+  const [statusText, setStatusText] = useState("");
 
   const handleShortcutKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     e.preventDefault();
@@ -380,6 +384,7 @@ function App() {
     const activeScreenshot = overrideScreenshot ?? screenshot;
     if (!activeScreenshot || !activeSelection) return;
     setMode("processing");
+    setStatusText(settings.ocrEngine === "offline" ? "正在載入離線 OCR 引擎..." : t.processing);
     setError(null);
     try {
       // 先載入截圖取得原生尺寸，計算 HiDPI 縮放比例
@@ -414,7 +419,8 @@ function App() {
       // Step 1：Windows OCR 取得每行文字與精確座標
       const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
       const targetLang = transDir === "zh-en" ? "en" : "zh";
-      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang });
+      const ocrEngine = settings.ocrEngine === "offline" ? "offline" : "windows";
+      const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang, ocrEngine });
       
       console.log(`[OCR] 偵測語言為 ${ocrLang}，共擷取到 ${ocrLines.length} 行文字:`);
       console.table(ocrLines.map((l, idx) => ({ 索引: idx, 文字: l.text, X: Math.round(l.x), Y: Math.round(l.y), 寬: Math.round(l.width), 高: Math.round(l.height) })));
@@ -582,7 +588,7 @@ function App() {
       setError(String(err));
       setMode("selecting");
     }
-  }, [screenshot, selection, transDir, lang]);
+  }, [screenshot, selection, transDir, lang, settings.ocrEngine, settings.apiUrl, settings.model]);
 
   const handleFullScreenTranslate = useCallback(async () => {
     setError(null);
@@ -620,6 +626,14 @@ function App() {
     listen("toggle-capture", handleToggle).then((fn) => { cleanup = fn; });
     return () => cleanup?.();
   }, [handleToggle]);
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    listen<string>("ocr-status", (event) => {
+      setStatusText(event.payload);
+    }).then((fn) => { cleanup = fn; });
+    return () => cleanup?.();
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -690,6 +704,29 @@ function App() {
           <div className="settings-overlay" onClick={() => { setShowSettings(false); setIsRecording(false); }}>
             <div className="settings-modal" onClick={e => e.stopPropagation()}>
               <h3>設定 / Settings</h3>
+              <label>
+                OCR 引擎 / OCR Engine
+                <div className="ocr-engine-options">
+                  <label className="ocr-engine-option">
+                    <input
+                      type="radio"
+                      name="ocrEngine"
+                      checked={draftSettings.ocrEngine !== "offline"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
+                    />
+                    <span>Windows 內建 OCR（需安裝對應語言套件）</span>
+                  </label>
+                  <label className="ocr-engine-option">
+                    <input
+                      type="radio"
+                      name="ocrEngine"
+                      checked={draftSettings.ocrEngine === "offline"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
+                    />
+                    <span>內建離線 OCR（已內嵌約 21MB 模型，中英皆可，100% 免聯網、不依賴 Windows 語言包）</span>
+                  </label>
+                </div>
+              </label>
               <label>
                 自訂快捷鍵 / Custom Shortcut
                 <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
@@ -807,7 +844,7 @@ function App() {
       {mode === "processing" && (
         <div className="processing-overlay">
           <div className="spinner" />
-          <span>{t.processing}</span>
+          <span>{statusText || t.processing}</span>
         </div>
       )}
 

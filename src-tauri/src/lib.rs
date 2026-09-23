@@ -3,8 +3,11 @@ use screenshots::Screen;
 use screenshots::image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use tauri::{Emitter, Manager};
+use std::sync::{Mutex, OnceLock};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 /// 採用動態高階縮放演算法，為中低解析度、精細菜單或深色背景中細小中文字體進行高階插值（Lanczos3）放大。
 /// 由於邊緣自適應填充技術 (Adaptive Padding) 已經全部轉移至上層 React 實施（取得更加乾淨且
@@ -106,8 +109,109 @@ async fn start_capture(window: tauri::WebviewWindow) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", encoded))
 }
 
+fn emit_ocr_status(message: &str) {
+    println!("[offline-ocr] {message}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    if let Some(app) = crate::APP_HANDLE.get() {
+        let _ = app.emit("ocr-status", message.to_string());
+    }
+}
+
+// 內建離線 OCR 模型資料直接打包進執行檔，免網路免外部下載
+static MODEL_DET_BYTES: &[u8] = include_bytes!("../models/pp-ocrv5_mobile_det.onnx");
+static MODEL_REC_BYTES: &[u8] = include_bytes!("../models/pp-ocrv5_mobile_rec.onnx");
+static MODEL_DICT_STR: &str = include_str!("../models/ppocrv5_dict.txt");
+
+/// 內建離線 OCR（PP-OCRv5 mobile，中英共用同一套模型）。
+/// 模型已編譯進執行檔，在任何電腦上直接打開即可 100% 離線使用。
+fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
+    static ENGINE: OnceLock<Mutex<oar_ocr::oarocr::OAROCR>> = OnceLock::new();
+    if let Some(engine) = ENGINE.get() {
+        return Ok(engine);
+    }
+    emit_ocr_status("正在載入內建離線辨識引擎...");
+    let built = oar_ocr::oarocr::OAROCRBuilder::new(
+        MODEL_DET_BYTES.to_vec(),
+        MODEL_REC_BYTES.to_vec(),
+        "dummy_dict_path.txt",
+    )
+    .character_dict_content(MODEL_DICT_STR)
+    .build()
+    .map_err(|e| format!("離線 OCR 模型載入失敗：{e}"))?;
+    let _ = ENGINE.set(Mutex::new(built));
+    emit_ocr_status("離線辨識引擎已就緒");
+    ENGINE
+        .get()
+        .ok_or_else(|| "離線 OCR 引擎初始化失敗".to_string())
+}
+
+fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
+    let raw_img = screenshots::image::load_from_memory(image_data).map_err(|e| e.to_string())?;
+    let (w, h) = (raw_img.width(), raw_img.height());
+    // 離線模型對小字也需要足夠像素，沿用同一套放大，座標再除回去。
+    let (processed, scale) = preprocess_for_ocr(raw_img);
+    // oar-ocr 與截圖函式庫使用不同版本的 image crate，不能直接傳 ImageBuffer。
+    // 寫成暫存 PNG 後用 oar-ocr 自己的載入器讀回，座標仍對應同一張放大後的圖。
+    let temp_path = std::env::temp_dir().join(format!(
+        "screen-translator-ocr-{}.png",
+        std::process::id()
+    ));
+    std::fs::write(&temp_path, &processed).map_err(|e| e.to_string())?;
+    let rgb = oar_ocr::utils::load_image(&temp_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&temp_path);
+
+    let engine = offline_engine()?;
+    let guard = engine
+        .lock()
+        .map_err(|_| "離線 OCR 引擎忙碌中".to_string())?;
+    let results = guard
+        .predict(vec![rgb])
+        .map_err(|e| format!("離線 OCR 辨識失敗：{e}"))?;
+    drop(guard);
+
+    let regions = results
+        .into_iter()
+        .next()
+        .map(|r| r.text_regions)
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    for region in regions {
+        let Some((text, confidence)) = region.text_with_confidence() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || confidence < 0.35 {
+            continue;
+        }
+        let (x0, y0, x1, y1) = region.bounding_box.aabb();
+        let width = ((x1 - x0) as f64 / scale).max(1.0);
+        let height = ((y1 - y0) as f64 / scale).max(1.0);
+        if width < 2.0 || height < 2.0 {
+            continue;
+        }
+        lines.push(OcrLine {
+            text: text.to_string(),
+            x: (x0 as f64 / scale).clamp(0.0, w as f64),
+            y: (y0 as f64 / scale).clamp(0.0, h as f64),
+            width,
+            height,
+        });
+    }
+    lines.sort_by(|a, b| {
+        a.y.partial_cmp(&b.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    Ok(lines)
+}
+
 #[tauri::command]
-async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine>, String> {
+async fn ocr_image(
+    image_base64: String,
+    ocr_lang: String,
+    ocr_engine: Option<String>,
+) -> Result<Vec<OcrLine>, String> {
     let data_str = image_base64
         .strip_prefix("data:image/png;base64,")
         .unwrap_or(&image_base64)
@@ -115,6 +219,13 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
     let image_data = general_purpose::STANDARD
         .decode(&data_str)
         .map_err(|e| e.to_string())?;
+
+    let engine = ocr_engine.unwrap_or_else(|| "windows".to_string());
+    if engine == "offline" {
+        return tokio::task::spawn_blocking(move || ocr_with_offline(&image_data))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     tokio::task::spawn_blocking(move || {
         use windows::{
@@ -678,6 +789,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let _ = APP_HANDLE.set(app.handle().clone());
             use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton};
             use tauri::menu::{Menu, MenuItem};
 

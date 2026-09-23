@@ -130,6 +130,27 @@ body {
   margin-bottom: 4px;
 }
 
+.ocr-engine-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ocr-engine-option {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ocr-engine-option input {
+  margin-top: 3px;
+  width: auto !important;
+}
+
 .settings-modal label {
   display: flex;
   flex-direction: column;
