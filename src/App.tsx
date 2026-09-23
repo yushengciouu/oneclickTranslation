@@ -167,55 +167,39 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
 
   if (isZh) {
     // 英文翻中文 (en-zh)：
-    // 中文字體複雜度高、筆劃較多，需要至少 11px 才清晰。由於中文翻譯長度多半比英文原文短，
-    // 為了保證大小層次分明（文章標題大、內文小），不應使用窄小的範圍硬性截斷。
-    // 我們將基準字體與原始框高（height）直接成等比比例縮放（height * 0.72），最低 11.5px。
-    const baseSize = Math.max(11.5, height * 0.72);
-    const singleCharWidth = 0.98; // 中文接近 1:1 的正方形寬度
-    const asciiCharWidth = 0.55;  // 半形字元寬度
-    const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
+    // 一般段落文字 height 約 14~20px，基準字體設為 height * 0.68；
+    // 按鈕或輸入框高度常有 30~38px，上限限制為 14.5px 避免短詞字體暴衝。
+    const isSmallUiElement = height < 40 && width < 240;
+    const baseSize = isSmallUiElement
+      ? Math.max(9.5, Math.min(height * 0.60, 14.5))
+      : Math.max(10.0, Math.min(height * 0.68, 28.0));
 
-    if (expectedWidth > width) {
-      // 動態判定：如果容器高度小於字體大小的 1.6 倍，說明空間只夠放單行文字
-      if (height < baseSize * 1.6) {
-        // 單行模式：盡可能縮小以容納，建置最低下限為 11px 以免字體太小模糊不清
-        const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
-        return `${Math.max(11, Math.min(baseSize, fitSize)).toFixed(1)}px`;
-      } else {
-        // 多行模式
-        const area = width * height;
-        const requiredArea = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize * (baseSize * 1.35);
-        if (requiredArea > area) {
-          const ratio = Math.sqrt(area / requiredArea);
-          return `${Math.max(11, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
-        }
-      }
+    const singleCharWidth = 1.0;  // 中文字方形寬度比例
+    const asciiCharWidth = 0.55;  // 半形字元寬度
+    const totalUnits = Math.max(1, zhChars * singleCharWidth + enChars * asciiCharWidth);
+    const expectedWidth = totalUnits * baseSize;
+
+    // 當文字總寬超過容器寬度時，等比縮小字體以保持單行完整放入
+    if (expectedWidth > width - 6) {
+      const fitSize = (width - 6) / totalUnits;
+      return `${Math.max(8.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
     }
     return `${baseSize.toFixed(1)}px`;
   } else {
     // 中文翻英文 (zh-en)：
-    // 英文雖然可讀性高，但如果基準字體和下界拉得太低，在日常螢幕閱讀時依然會顯得太小、吃力。
-    // 我們同步將中翻英的文字比例調優：基準字體與原始框高成等比比例縮放 (height * 0.72)，
-    // 同時將中翻英的最舒服閱讀下限字體從 9.5px 顯著拉高至 11px，保障英文在任何時候都大氣清晰、舒適好讀！
-    const baseSize = Math.max(11.5, height * 0.72);
+    const isSmallUiElement = height < 40 && width < 240;
+    const baseSize = isSmallUiElement
+      ? Math.max(9.5, Math.min(height * 0.60, 14.5))
+      : Math.max(10.0, Math.min(height * 0.68, 28.0));
+
     const singleCharWidth = 0.95;
     const asciiCharWidth = 0.55;
-    const expectedWidth = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize;
+    const totalUnits = Math.max(1, zhChars * singleCharWidth + enChars * asciiCharWidth);
+    const expectedWidth = totalUnits * baseSize;
 
-    if (expectedWidth > width) {
-      if (height < baseSize * 1.6) {
-        // 單行模式：盡可能縮小以容納，最低下限設為 11px，保障在中翻英時英文不要縮得太小
-        const fitSize = width / (zhChars * singleCharWidth + enChars * asciiCharWidth);
-        return `${Math.max(11, Math.min(baseSize, fitSize)).toFixed(1)}px`;
-      } else {
-        // 多行模式
-        const area = width * height;
-        const requiredArea = (zhChars * singleCharWidth + enChars * asciiCharWidth) * baseSize * (baseSize * 1.25);
-        if (requiredArea > area) {
-          const ratio = Math.sqrt(area / requiredArea);
-          return `${Math.max(11, Math.min(baseSize, baseSize * ratio)).toFixed(1)}px`;
-        }
-      }
+    if (expectedWidth > width - 6) {
+      const fitSize = (width - 6) / totalUnits;
+      return `${Math.max(8.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
     }
     return `${baseSize.toFixed(1)}px`;
   }
@@ -384,7 +368,7 @@ function App() {
     const activeScreenshot = overrideScreenshot ?? screenshot;
     if (!activeScreenshot || !activeSelection) return;
     setMode("processing");
-    setStatusText(settings.ocrEngine === "offline" ? "正在載入離線 OCR 引擎..." : t.processing);
+    setStatusText(t.processing);
     setError(null);
     try {
       // 先載入截圖取得原生尺寸，計算 HiDPI 縮放比例
@@ -493,32 +477,17 @@ function App() {
           }
         }
 
-        // 推估將該段翻譯完美放入單行所需要的最低安全像素寬度
-        const characterWidthEst = targetLang === "zh"
-          ? (zhCount * 13.5 + enCount * 6.5) // 中文繁體筆劃大，預估單字寬 13.5px
-          : (zhCount * 13.5 + enCount * 6.0); // 英文小寫字母，單字元預估寬 6.0px
-        const safeMinWidth = characterWidthEst + 14; // 加上左右各自少許 padding 的安全寬度
-
-        // 【高畫質安全寬度適配】：
-        if (targetLang === "en") {
-          // 中翻英：英文單字與字元長度通常比中文原文膨脹 1.3 ~ 1.6 倍。
-          // 為了提供英文單字折行及長片語呼吸空間，適度微調增加 20% ~ 35% 寬度（限制最高增加 40px），
-          // 這既給予英文完美的渲染緩衝，又絕對不會像以前一樣無底線拉長到螢幕邊緣破壞整片圖表！
-          const expansion = Math.min(40, boxW * 0.3);
-          boxW = boxW + expansion;
+        // 短詞防斷行適配：只針對 <= 6 字元的短標籤/單字/按鈕項目給予自適應寬度安全保障
+        // 長句子與文章段落行則維持原始偵測寬度 (+ 6px 邊界緩衝)，由字體大小自動等比收縮，絕不隨意橫向膨脹跑版！
+        if (cleanTrans.length <= 6) {
+          const characterWidthEst = targetLang === "zh"
+            ? (zhCount * 12.0 + enCount * 6.5) + 8
+            : (zhCount * 12.0 + enCount * 6.0) + 8;
+          const paddingBonus = Math.max(8, Math.min(22, boxW * 0.35));
+          boxW = Math.max(boxW + paddingBonus, characterWidthEst);
         } else {
-          // 英翻中 (targetLang === "zh")：
-          // 當原文是側邊欄、設定列表這類「極短單字/列表項」（例如 Emails、Models、Features、Pages），
-          // 翻譯後的中文長度可能與英文相當甚至稍長，但原 OCR 偵測邊框「極窄」且「沒有緩衝邊緣」，
-          // 這會導致翻譯後的中文因為寬度被壓得太死，被迫發生「極其醜陋的單字卡線強制斷行」（例如：電 子 郵 件 變成上下垂直三行、儲 存 庫 變成兩行）。
-          // 解決方案：當偵測到偵測框寬度 w 較窄時，主動給予中文一個「最寬防折行補貼」（額外寬度：16px ~ 35px），
-          // 這既能保證短清單項目絕對能在單行內優雅舒展不折行，又不會拉長到破壞地圖或排版！
-          const paddingBonus = Math.max(16, Math.min(35, boxW * 0.4));
-          boxW = boxW + paddingBonus;
+          boxW = boxW + 6;
         }
-
-        // 雙重加固：為防單字內截斷，寬度必定大於最小安全寬度。
-        boxW = Math.max(boxW, safeMinWidth);
 
         const bgColor = sampleBgColor(
           imgEl,
@@ -537,45 +506,23 @@ function App() {
         };
       }).filter((t): t is TranslationLine => t !== null);
 
-      // 【極致重疊安全與過濾演算法】：
-      // Windows OCR 有時會對極為密集的清單，將「整行大字」與「裡面的細部拆分字詞」同時以多個重疊框回傳。
-      // 或者是同一個文字被偵測了兩次（例如 Y 軸和高度近乎完全重合，且 X 座標有 80% 以上重疊）。
-      // 為此，我們執行一次「同行重疊與子字元包含過濾」，將完全被大框包含的小框、或是重複偵測的雜訊直接剔除，
-      // 這保證了最終渲染到 CSS 上的翻譯容器，絕不會出現原圖中那樣「同一個地方疊上下兩個不同詞彙、甚至重複翻譯覆蓋」的混亂場面！
+      // 【嚴密 2D Bounding Box NMS 去重演算法】：
+      // 徹底解決 OCR 重複偵測同一行、同句文字位移重疊（疊字、殘影）的嚴重問題
       const result: TranslationLine[] = [];
       for (const current of resultBeforeFilter) {
-        let isOverlappedAndSmaller = false;
-        for (const other of resultBeforeFilter) {
-          if (current === other) continue;
+        let isDuplicate = false;
+        for (const accepted of result) {
+          const overlapX = Math.max(0, Math.min(current.x + current.width, accepted.x + accepted.width) - Math.max(current.x, accepted.x));
+          const overlapY = Math.max(0, Math.min(current.y + current.height, accepted.y + accepted.height) - Math.max(current.y, accepted.y));
+          const overlapArea = overlapX * overlapY;
+          const minArea = Math.min(current.width * current.height, accepted.width * accepted.height);
           
-          // 定義 Y 軸與高度是否重合（同行）
-          const yOverlaps = Math.abs(current.y - other.y) < Math.max(current.height, other.height) * 0.5;
-          
-          if (yOverlaps) {
-            // 計算 X 軸重疊份量 (Intersection over Union / Containment)
-            const curLeft = current.x;
-            const curRight = current.x + current.width;
-            const othLeft = other.x;
-            const othRight = other.x + other.width;
-            
-            const overlapLeft = Math.max(curLeft, othLeft);
-            const overlapRight = Math.min(curRight, othRight);
-            
-            if (overlapRight > overlapLeft) {
-              const intersectionWidth = overlapRight - overlapLeft;
-              const curWidth = current.width;
-              
-              // 如果 current 框被 other 框包含超過 75%，且 current 的面積或長度小於 other，
-              // 代表 current 只是 large-text 內部的冗餘局部碎片偵測字詞，必需予以剔除！
-              const containmentRatio = intersectionWidth / curWidth;
-              if (containmentRatio > 0.75 && current.original.length < other.original.length) {
-                isOverlappedAndSmaller = true;
-                break;
-              }
-            }
+          if (minArea > 0 && overlapArea / minArea > 0.50) {
+            isDuplicate = true;
+            break;
           }
         }
-        if (!isOverlappedAndSmaller) {
+        if (!isDuplicate) {
           result.push(current);
         }
       }
@@ -812,25 +759,22 @@ function App() {
             const targetLang = transDir === "zh-en" ? "en" : "zh";
             const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height, targetLang);
             // 加上上下左右少許 padding/margin 偏移與尺寸膨脹補貼，確保完美蓋住原文
-            const paddingOffset = 1.5; 
+            const paddingOffset = 1.0; 
             return (
               <div key={i} className="translation-box" title={t.translated} style={{
                 left: t.x - resultSelection.x + 30 - paddingOffset,
                 top: t.y - resultSelection.y + 15 - paddingOffset,
                 width: t.width + paddingOffset * 2,
-                minHeight: t.height + paddingOffset * 2, // 既設 minHeight 避免單詞折行蓋不住，又限制高度差
+                height: t.height + paddingOffset * 2,
                 fontSize: dynamicFontSize,
                 background: t.bgColor,
                 color: t.textColor,
-                // 高度特製化文字與排版設定
-                lineHeight: targetLang === "zh" ? 1.35 : 1.25,
-                // 為解決英文單字被垂直撕裂截斷的痛點（例如 Gallery 變成 Galler\ny），
-                // 英文採用 "normal" (或 "keep-all") 來保持單字完整，絕不硬性於字母間裁斷折行！
-                // 只有中文因為字元間無空格才允許隨意按字元 "break-all" 折行。
-                wordBreak: targetLang === "zh" ? "break-all" : "normal",
-                overflowWrap: targetLang === "zh" ? "anywhere" : "break-word",
-                letterSpacing: targetLang === "zh" ? "0.02em" : "-0.012em",
-                fontWeight: targetLang === "zh" ? 550 : 500,
+                lineHeight: 1.15,
+                whiteSpace: "nowrap",
+                wordBreak: "keep-all",
+                overflow: "hidden",
+                letterSpacing: targetLang === "zh" ? "0.01em" : "-0.01em",
+                fontWeight: targetLang === "zh" ? 500 : 500,
               }}>
                 {t.translated}
               </div>

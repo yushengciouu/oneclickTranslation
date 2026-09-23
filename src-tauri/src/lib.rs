@@ -51,13 +51,9 @@ fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
     let scale = if h < 180 || w < 350 {
         let scale_h = 180.0 / h as f64;
         let scale_w = 350.0 / w as f64;
-        scale_h.max(scale_w).min(5.0) // 高畫質插值保底
-    } else if w > 3000 || h > 2000 {
-        1.0f64
-    } else if w > 1600 || h > 1200 {
-        1.5f64
+        scale_h.max(scale_w).min(4.0) // 高畫質插值保底
     } else {
-        2.0f64
+        1.0f64
     };
 
     let (output_img, final_scale) = if scale > 1.0 {
@@ -190,13 +186,34 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
         if width < 2.0 || height < 2.0 {
             continue;
         }
-        lines.push(OcrLine {
+        let line = OcrLine {
             text: text.to_string(),
             x: (x0 as f64 / scale).clamp(0.0, w as f64),
             y: (y0 as f64 / scale).clamp(0.0, h as f64),
             width,
             height,
+        };
+
+        // NMS: 去除與既有框重疊過高 (IoU / 覆蓋率 > 60%) 的重複偵測框
+        let is_duplicate = lines.iter_mut().any(|existing: &mut OcrLine| {
+            let ox = (line.x + line.width).min(existing.x + existing.width) - line.x.max(existing.x);
+            let oy = (line.y + line.height).min(existing.y + existing.height) - line.y.max(existing.y);
+            if ox > 0.0 && oy > 0.0 {
+                let overlap_area = ox * oy;
+                let min_area = (line.width * line.height).min(existing.width * existing.height);
+                if min_area > 0.0 && overlap_area / min_area > 0.60 {
+                    if line.text.len() > existing.text.len() {
+                        *existing = line.clone();
+                    }
+                    return true;
+                }
+            }
+            false
         });
+
+        if !is_duplicate {
+            lines.push(line);
+        }
     }
     lines.sort_by(|a, b| {
         a.y.partial_cmp(&b.y)
