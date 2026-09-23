@@ -167,6 +167,28 @@ async fn ocr_image(image_base64: String, ocr_lang: String) -> Result<Vec<OcrLine
 
         let language =
             Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;
+
+        // TryCreateFromLanguage 在語言未安裝 OCR 元件時不會回傳 Err，而是回傳空物件，
+        // 之後呼叫 RecognizeAsync 會導致不明確的失敗，因此先用 IsLanguageSupported 明確擋下並回報可診斷的錯誤。
+        let supported = OcrEngine::IsLanguageSupported(&language).unwrap_or(false);
+        if !supported {
+            let available = OcrEngine::AvailableRecognizerLanguages()
+                .ok()
+                .map(|langs| {
+                    (0..langs.Size().unwrap_or(0))
+                        .filter_map(|i| langs.GetAt(i).ok())
+                        .filter_map(|l| l.LanguageTag().ok())
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "此電腦尚未安裝「{}」的 Windows OCR 語言套件（設定 > 時間與語言 > 語言與地區 > 該語言 > 選用功能 > 光學字元辨識）。目前已安裝的 OCR 語言：[{}]",
+                ocr_lang, available
+            ));
+        }
+
         let engine =
             OcrEngine::TryCreateFromLanguage(&language).map_err(|e| e.to_string())?;
 
@@ -588,7 +610,6 @@ async fn vision_ocr_translate(image_base64: String, api_url: String, model: Stri
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
@@ -596,6 +617,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app_handle, _shortcut, event| {
