@@ -526,10 +526,28 @@ function App() {
         for (const accepted of result) {
           const overlapX = Math.max(0, Math.min(current.x + current.width, accepted.x + accepted.width) - Math.max(current.x, accepted.x));
           const overlapY = Math.max(0, Math.min(current.y + current.height, accepted.y + accepted.height) - Math.max(current.y, accepted.y));
-          const overlapArea = overlapX * overlapY;
-          const minArea = Math.min(current.width * current.height, accepted.width * accepted.height);
+          const minW = Math.min(current.width, accepted.width);
+          const minH = Math.min(current.height, accepted.height);
+          const xRatio = minW > 0 ? overlapX / minW : 0;
+          const yRatio = minH > 0 ? overlapY / minH : 0;
+          const cyDiff = Math.abs((current.y + current.height / 2) - (accepted.y + accepted.height / 2));
           
-          if (minArea > 0 && overlapArea / minArea > 0.50) {
+          const isTextSimilar = current.translated === accepted.translated 
+            || current.original === accepted.original
+            || (current.translated.length >= 3 && accepted.translated.includes(current.translated))
+            || (accepted.translated.length >= 3 && current.translated.includes(accepted.translated));
+          
+          // 若 X 軸重疊 > 45% 且 Y 軸重疊 > 25%，或者文字高度相似且 Y 軸中心非常接近，判定為重複疊字/陰影框
+          if ((xRatio > 0.45 && yRatio > 0.25) || (isTextSimilar && cyDiff < minH * 0.80)) {
+            // 保留譯文較長、較完整且外框涵蓋範圍較大者
+            if (current.translated.length > accepted.translated.length) {
+              accepted.translated = current.translated;
+              accepted.original = current.original;
+            }
+            accepted.x = Math.min(accepted.x, current.x);
+            accepted.y = Math.min(accepted.y, current.y);
+            accepted.width = Math.max(accepted.width, current.width);
+            accepted.height = Math.max(accepted.height, current.height);
             isDuplicate = true;
             break;
           }

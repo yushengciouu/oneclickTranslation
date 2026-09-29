@@ -194,14 +194,25 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             height,
         };
 
-        // NMS: 去除與既有框重疊過高 (IoU / 覆蓋率 > 60%) 的重複偵測框
+        // 嚴密 NMS：針對文字塊特性進行高精確度去重
+        // 只要兩者水平重疊 > 50% 且垂直重疊 > 30%，或包含彼此文字且垂直相近，即視為同一文字塊的重複偵測
         let is_duplicate = lines.iter_mut().any(|existing: &mut OcrLine| {
             let ox = (line.x + line.width).min(existing.x + existing.width) - line.x.max(existing.x);
             let oy = (line.y + line.height).min(existing.y + existing.height) - line.y.max(existing.y);
             if ox > 0.0 && oy > 0.0 {
+                let min_w = line.width.min(existing.width);
+                let min_h = line.height.min(existing.height);
+                let overlap_x = ox / min_w;
+                let overlap_y = oy / min_h;
                 let overlap_area = ox * oy;
                 let min_area = (line.width * line.height).min(existing.width * existing.height);
-                if min_area > 0.0 && overlap_area / min_area > 0.60 {
+
+                let is_dup = (overlap_x > 0.50 && overlap_y > 0.30)
+                    || (overlap_area / min_area > 0.45)
+                    || ((line.text.contains(&existing.text) || existing.text.contains(&line.text)) && overlap_y > 0.25);
+
+                if is_dup {
+                    // 保留文字較長、偵測較完整的框
                     if line.text.len() > existing.text.len() {
                         *existing = line.clone();
                     }
@@ -217,7 +228,9 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
     }
 
     // 1. 同水平行聚類分組與相鄰詞塊合併演算法 (Row Grouping & Same-Line Merge)
-    // 徹底解決 PP-OCRv5 DBNet 將同一行英文分割為多個零碎單字框、以及 Y 軸微小抖動導致單字順序顛倒跑版的問題
+    // 嚴格限制：
+    // - 垂直中心 Y 差距在字高的 35% 以內
+    // - 同一水平行的各區塊在 X 軸上不得有顯著重疊（有重疊代表是一上一下的兩行，禁止進同一行）
     lines.sort_by(|a, b| {
         let cy_a = a.y + a.height / 2.0;
         let cy_b = b.y + b.height / 2.0;
@@ -233,8 +246,23 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
     for line in lines {
         let cy = line.y + line.height / 2.0;
         let h = line.height;
-        // 如果中心 Y 差距在字高的 50% 以內，視為同一水平行
-        if let Some(row) = rows.iter_mut().find(|r| (r.avg_cy - cy).abs() < h.max(12.0) * 0.5) {
+
+        let matched_row = rows.iter_mut().find(|r| {
+            // 垂直距離必須非常接近（字高 35% 以內）
+            let y_close = (r.avg_cy - cy).abs() < h.max(12.0) * 0.35;
+            if !y_close {
+                return false;
+            }
+            // 同一行內的所有既有項目，絕對不能與新 line 在 X 軸上有重疊（超過 15% 重疊即視為垂直堆疊不同行）
+            let has_x_overlap = r.items.iter().any(|item| {
+                let ox = (line.x + line.width).min(item.x + item.width) - line.x.max(item.x);
+                let min_w = line.width.min(item.width);
+                ox > 0.0 && min_w > 0.0 && (ox / min_w) > 0.15
+            });
+            !has_x_overlap
+        });
+
+        if let Some(row) = matched_row {
             let count = row.items.len() as f64;
             row.avg_cy = (row.avg_cy * count + cy) / (count + 1.0);
             row.items.push(line);
@@ -251,7 +279,7 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
 
     let mut merged_lines = Vec::new();
     for mut row in rows {
-        // 同一行內的單字/詞塊，嚴格按 X 座標由左至右排序，杜絕 Y 軸微小波動導致的倒置
+        // 同一行內的單字/詞塊，嚴格按 X 座標由左至右排序
         row.items.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut row_merged: Vec<OcrLine> = Vec::new();
@@ -261,8 +289,18 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
                 let gap = item.x - prev_right;
                 let max_h = prev.height.max(item.height);
 
-                // 若相鄰兩個框水平間距合理（包括微小重疊，或間隔小於 2.2 倍字高），視為同一句內的詞，予以合併為完整行
-                if gap >= -8.0 && gap <= max_h * 2.2 {
+                // 若 X 軸有負重疊（gap < -4.0），代表仍是重複/陰影偵測框，取文字長者去重
+                if gap < -4.0 {
+                    if item.text.len() > prev.text.len() {
+                        *prev = item;
+                    }
+                    continue;
+                }
+
+                // 合併間距大幅收緊：正常英文字詞空格僅 3~8px。
+                // 只有在 -4.0 <= gap <= 10.0 且 gap <= max_h * 0.75 時才視為同句單字合併，
+                // 絕不跨越 20~40px 的欄位間距（Column Gutter）去誤合併隔壁新聞卡片！
+                if gap >= -4.0 && gap <= 10.0 && gap <= max_h * 0.75 {
                     let new_text = {
                         let l_trimmed = prev.text.trim();
                         let r_trimmed = item.text.trim();
