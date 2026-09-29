@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
@@ -187,19 +187,21 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
     return `${baseSize.toFixed(1)}px`;
   } else {
     // 中文翻英文 (zh-en)：
-    const isSmallUiElement = height < 40 && width < 240;
+    // 英文小寫字母 x-height 較小，同樣 px 視覺上比漢字小，因此提高 baseSize 比例與保底字號
+    const isSmallUiElement = height < 40 && width < 300;
     const baseSize = isSmallUiElement
-      ? Math.max(9.5, Math.min(height * 0.60, 14.5))
-      : Math.max(10.0, Math.min(height * 0.68, 28.0));
+      ? Math.max(11.0, Math.min(height * 0.68, 15.5))
+      : Math.max(11.5, Math.min(height * 0.72, 28.0));
 
     const singleCharWidth = 0.95;
-    const asciiCharWidth = 0.55;
+    const asciiCharWidth = 0.52;
     const totalUnits = Math.max(1, zhChars * singleCharWidth + enChars * asciiCharWidth);
     const expectedWidth = totalUnits * baseSize;
 
-    if (expectedWidth > width - 6) {
-      const fitSize = (width - 6) / totalUnits;
-      return `${Math.max(8.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+    if (expectedWidth > width - 4) {
+      const fitSize = (width - 4) / totalUnits;
+      // 保底提升至 10.5px，徹底杜絕縮成微米無法辨認的字體
+      return `${Math.max(10.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
     }
     return `${baseSize.toFixed(1)}px`;
   }
@@ -477,16 +479,26 @@ function App() {
           }
         }
 
-        // 短詞防斷行適配：只針對 <= 6 字元的短標籤/單字/按鈕項目給予自適應寬度安全保障
-        // 長句子與文章段落行則維持原始偵測寬度 (+ 6px 邊界緩衝)，由字體大小自動等比收縮，絕不隨意橫向膨脹跑版！
-        if (cleanTrans.length <= 6) {
-          const characterWidthEst = targetLang === "zh"
-            ? (zhCount * 12.0 + enCount * 6.5) + 8
-            : (zhCount * 12.0 + enCount * 6.0) + 8;
-          const paddingBonus = Math.max(8, Math.min(22, boxW * 0.35));
-          boxW = Math.max(boxW + paddingBonus, characterWidthEst);
+        // 【極致自適應寬度安全保障演算法】：
+        if (targetLang === "en") {
+          // 【中文翻英文】：英文字元顯著膨脹（如「通知」2字 -> "Notifications" 13字）
+          // 針對英文短語/單字（長度 <= 35 字元），計算以 11~12px 舒適閱讀所需的寬度並適度向右延展：
+          const neededWidth = enCount * 7.2 + zhCount * 12.0 + 12;
+          if (cleanTrans.length <= 35) {
+            boxW = Math.max(boxW + 8, neededWidth);
+          } else {
+            // 長句亦給予 15%~25% 的合理延展寬度，避免過度擠壓
+            boxW = Math.max(boxW + 12, Math.min(boxW * 1.25, neededWidth));
+          }
         } else {
-          boxW = boxW + 6;
+          // 【英文翻中文】：短詞防斷行適配（<= 8 字元給予自適應寬度安全保障）
+          if (cleanTrans.length <= 8) {
+            const characterWidthEst = (zhCount * 12.0 + enCount * 6.5) + 8;
+            const paddingBonus = Math.max(8, Math.min(22, boxW * 0.35));
+            boxW = Math.max(boxW + paddingBonus, characterWidthEst);
+          } else {
+            boxW = boxW + 6;
+          }
         }
 
         const bgColor = sampleBgColor(
@@ -661,7 +673,7 @@ function App() {
                       checked={draftSettings.ocrEngine !== "offline"}
                       onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
                     />
-                    <span>Windows 內建 OCR（需安裝對應語言套件）</span>
+                    <span>Windows OCR</span>
                   </label>
                   <label className="ocr-engine-option">
                     <input
@@ -670,7 +682,7 @@ function App() {
                       checked={draftSettings.ocrEngine === "offline"}
                       onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
                     />
-                    <span>內建離線 OCR（已內嵌約 21MB 模型，中英皆可，100% 免聯網、不依賴 Windows 語言包）</span>
+                    <span>PP-OCRv5</span>
                   </label>
                 </div>
               </label>
@@ -750,7 +762,7 @@ function App() {
           position: "absolute",
           left: resultSelection.x - 30, // 左右與上下給予充足的溢位溢出緩衝區，杜絕部分被微調加寬加高的翻譯方塊（尤其短字）被 Clipping 容器直接裁截掉、而露出原圖的視覺瑕疵！
           top: resultSelection.y - 15,
-          width: resultSelection.width + 60,
+          width: resultSelection.width + (transDir === "zh-en" ? 120 : 60),
           height: resultSelection.height + 30,
           overflow: "hidden",
           pointerEvents: "none",

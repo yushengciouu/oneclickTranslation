@@ -1,4 +1,4 @@
-﻿use base64::{engine::general_purpose, Engine as _};
+use base64::{engine::general_purpose, Engine as _};
 use screenshots::Screen;
 use screenshots::image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
@@ -215,12 +215,91 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             lines.push(line);
         }
     }
+
+    // 1. 同水平行聚類分組與相鄰詞塊合併演算法 (Row Grouping & Same-Line Merge)
+    // 徹底解決 PP-OCRv5 DBNet 將同一行英文分割為多個零碎單字框、以及 Y 軸微小抖動導致單字順序顛倒跑版的問題
     lines.sort_by(|a, b| {
-        a.y.partial_cmp(&b.y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+        let cy_a = a.y + a.height / 2.0;
+        let cy_b = b.y + b.height / 2.0;
+        cy_a.partial_cmp(&cy_b).unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(lines)
+
+    struct RowGroup {
+        avg_cy: f64,
+        items: Vec<OcrLine>,
+    }
+
+    let mut rows: Vec<RowGroup> = Vec::new();
+    for line in lines {
+        let cy = line.y + line.height / 2.0;
+        let h = line.height;
+        // 如果中心 Y 差距在字高的 50% 以內，視為同一水平行
+        if let Some(row) = rows.iter_mut().find(|r| (r.avg_cy - cy).abs() < h.max(12.0) * 0.5) {
+            let count = row.items.len() as f64;
+            row.avg_cy = (row.avg_cy * count + cy) / (count + 1.0);
+            row.items.push(line);
+        } else {
+            rows.push(RowGroup {
+                avg_cy: cy,
+                items: vec![line],
+            });
+        }
+    }
+
+    // 依照行的平均 Y 軸由上至下嚴格排序
+    rows.sort_by(|a, b| a.avg_cy.partial_cmp(&b.avg_cy).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut merged_lines = Vec::new();
+    for mut row in rows {
+        // 同一行內的單字/詞塊，嚴格按 X 座標由左至右排序，杜絕 Y 軸微小波動導致的倒置
+        row.items.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut row_merged: Vec<OcrLine> = Vec::new();
+        for item in row.items {
+            if let Some(prev) = row_merged.last_mut() {
+                let prev_right = prev.x + prev.width;
+                let gap = item.x - prev_right;
+                let max_h = prev.height.max(item.height);
+
+                // 若相鄰兩個框水平間距合理（包括微小重疊，或間隔小於 2.2 倍字高），視為同一句內的詞，予以合併為完整行
+                if gap >= -8.0 && gap <= max_h * 2.2 {
+                    let new_text = {
+                        let l_trimmed = prev.text.trim();
+                        let r_trimmed = item.text.trim();
+                        let last_ch = l_trimmed.chars().last();
+                        let first_ch = r_trimmed.chars().next();
+                        if let (Some(l_c), Some(r_c)) = (last_ch, first_ch) {
+                            if l_c.is_ascii_alphanumeric() && r_c.is_ascii_alphanumeric() {
+                                format!("{} {}", l_trimmed, r_trimmed)
+                            } else if l_c.is_ascii() && r_c.is_ascii() && !l_c.is_whitespace() && !r_c.is_whitespace() {
+                                format!("{} {}", l_trimmed, r_trimmed)
+                            } else {
+                                format!("{}{}", l_trimmed, r_trimmed)
+                            }
+                        } else {
+                            format!("{}{}", l_trimmed, r_trimmed)
+                        }
+                    };
+
+                    let new_x = prev.x.min(item.x);
+                    let new_right = (prev.x + prev.width).max(item.x + item.width);
+                    let new_y = prev.y.min(item.y);
+                    let new_bottom = (prev.y + prev.height).max(item.y + item.height);
+
+                    prev.text = new_text;
+                    prev.x = new_x;
+                    prev.y = new_y;
+                    prev.width = new_right - new_x;
+                    prev.height = new_bottom - new_y;
+                    continue;
+                }
+            }
+            row_merged.push(item);
+        }
+        merged_lines.extend(row_merged);
+    }
+
+    Ok(merged_lines)
 }
 
 #[tauri::command]
