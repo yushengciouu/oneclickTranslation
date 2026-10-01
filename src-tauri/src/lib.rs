@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use screenshots::Screen;
 use screenshots::image::{DynamicImage, ImageFormat};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
@@ -142,17 +142,12 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
 }
 
 fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
-    let raw_img = screenshots::image::load_from_memory(image_data).map_err(|e| e.to_string())?;
-    let (w, h) = (raw_img.width(), raw_img.height());
-    // 離線模型對小字也需要足夠像素，沿用同一套放大，座標再除回去。
-    let (processed, scale) = preprocess_for_ocr(raw_img);
-    // oar-ocr 與截圖函式庫使用不同版本的 image crate，不能直接傳 ImageBuffer。
-    // 寫成暫存 PNG 後用 oar-ocr 自己的載入器讀回，座標仍對應同一張放大後的圖。
+    // 寫成暫存 PNG 後用 oar-ocr 載入器讀回進行預測
     let temp_path = std::env::temp_dir().join(format!(
         "screen-translator-ocr-{}.png",
         std::process::id()
     ));
-    std::fs::write(&temp_path, &processed).map_err(|e| e.to_string())?;
+    std::fs::write(&temp_path, image_data).map_err(|e| e.to_string())?;
     let rgb = oar_ocr::utils::load_image(&temp_path).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&temp_path);
 
@@ -181,8 +176,8 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             continue;
         }
         let (x0, y0, x1, y1) = region.bounding_box.aabb();
-        let width = ((x1 - x0) as f64 / scale).max(1.0);
-        let height = ((y1 - y0) as f64 / scale).max(1.0);
+        let width = ((x1 - x0) as f64).max(1.0);
+        let height = ((y1 - y0) as f64).max(1.0);
         if width < 2.0 || height < 2.0 {
             continue;
         }
@@ -233,8 +228,8 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
 
         let line = OcrLine {
             text: text.to_string(),
-            x: (x0 as f64 / scale).clamp(0.0, w as f64),
-            y: (y0 as f64 / scale).clamp(0.0, h as f64),
+            x: x0 as f64,
+            y: y0 as f64,
             width,
             height,
         };
@@ -483,24 +478,7 @@ async fn ocr_image(
                 }
             }
 
-            // 3. 【末端 數字/未讀數 篩選】：例如 Mail 資料夾右側的未讀數 "7" 或 "(7)"
-            // 若最右側單字為純數字，且與左側相鄰文字有足夠間距，我們不將其納入覆蓋框中，以保留 Outlook 原生的未讀數樣式與顏色。
-            if (end_idx > start_idx) && (end_idx - start_idx >= 2) {
-                let last_idx = end_idx - 1;
-                let w_last = &word_list[last_idx];
-                let w_prev = &word_list[last_idx - 1];
-
-                let is_pure_digit = w_last.text.chars().all(|c| c.is_ascii_digit() || "()（）".contains(c));
-                if is_pure_digit {
-                    let gap = w_last.x - (w_prev.x + w_prev.w);
-                    if gap > w_last.h * 0.35 || gap > 5.5 {
-                        // 排除尾端未讀數
-                        end_idx = last_idx;
-                    }
-                }
-            }
-
-            // 4. 重組排除 Icon 與未讀數後的淨化文字
+            // 3. 重組排除 Icon 後的淨化文字
             let clean_text = if start_idx == 0 && end_idx == word_list.len() {
                 raw_text
             } else if start_idx >= end_idx {
@@ -763,63 +741,7 @@ async fn update_shortcut(app_handle: tauri::AppHandle, shortcut_str: String) -> 
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct VisionLine {
-    original: String,
-    translated: String,
-}
 
-/// 用視覺語言模型一次完成 OCR + 翻譯，回傳每行原文與譯文
-#[tauri::command]
-async fn vision_ocr_translate(image_base64: String, api_url: String, model: String) -> Result<Vec<VisionLine>, String> {
-    // 去掉 data URL 前綴（"data:image/png;base64,"）
-    let b64 = if let Some(idx) = image_base64.find(',') {
-        image_base64[idx + 1..].to_string()
-    } else {
-        image_base64
-    };
-
-    let client = http_client();
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:image/png;base64,{}", b64) }
-                },
-                {
-                    "type": "text",
-                    "text": "Translate ALL text visible in this image into English. Output ONLY the translated text, no explanation, no original text, no markdown."
-                }
-            ]
-        }],
-        "max_tokens": 1000,
-        "temperature": 0.1
-    });
-
-    let endpoint = if api_url.ends_with("/v1/chat/completions") {
-        api_url.clone()
-    } else {
-        format!("{}/v1/chat/completions", api_url.trim_end_matches('/'))
-    };
-    let resp = client
-        .post(&endpoint)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format_reqwest_error(e, &endpoint))?;
-
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析視覺模型回應 JSON 失敗: {}", e))?;
-    let translated = json["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("Invalid model response")?
-        .trim()
-        .to_string();
-
-    Ok(vec![VisionLine { original: String::new(), translated }])
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -953,7 +875,6 @@ pub fn run() {
             close_overlay,
             ocr_image,
             translate_lines,
-            vision_ocr_translate,
             update_shortcut
         ])
         .run(tauri::generate_context!())

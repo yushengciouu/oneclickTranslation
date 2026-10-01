@@ -289,7 +289,6 @@ function App() {
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [translations, setTranslations] = useState<TranslationLine[]>([]);
-  const [resultSelection, setResultSelection] = useState<Rect | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -364,7 +363,6 @@ function App() {
     setScreenshot(null);
     setSelection(null);
     setTranslations([]);
-    setResultSelection(null);
     setError(null);
     setCopied(false);
   }, []);
@@ -491,44 +489,8 @@ function App() {
         // 我們直接以 OCR 精確定位的原始文字實際座標 (fx, fw) 來當作渲染的定位基準 (boxX, boxW)，
         // 這不管您的框選畫得再小再窄，譯文框都能像幽靈般 100% 精準與原文重疊！
         const boxX = fx;
-        let boxW = fw;
+        const boxW = fw;
         if (boxW <= 2) return null;
-
-        // 【極致自適應最小寬度安全保障演算法】：
-        // 解決「Galler y」、「Y u n g」等英文譯文因為原中文選取框（如單字、雙字清單）太窄
-        // 而被迫發生中斷、極醜陋單字內截斷換行（如 Yung 變成 Y \n u \n n \n g）的痛點！
-        let zhCount = 0;
-        let enCount = 0;
-        const cleanTrans = translated[i].trim();
-        for (let cIdx = 0; cIdx < cleanTrans.length; cIdx++) {
-          if (cleanTrans.charCodeAt(cIdx) > 127) {
-            zhCount++;
-          } else {
-            enCount++;
-          }
-        }
-
-        // 【極致自適應寬度安全保障演算法】：
-        if (targetLang === "en") {
-          // 【中文翻英文】：英文字元顯著膨脹（如「通知」2字 -> "Notifications" 13字）
-          // 針對英文短語/單字（長度 <= 35 字元），計算以 11~12px 舒適閱讀所需的寬度並適度向右延展：
-          const neededWidth = enCount * 7.2 + zhCount * 12.0 + 12;
-          if (cleanTrans.length <= 35) {
-            boxW = Math.max(boxW + 8, neededWidth);
-          } else {
-            // 長句亦給予 15%~25% 的合理延展寬度，避免過度擠壓
-            boxW = Math.max(boxW + 12, Math.min(boxW * 1.25, neededWidth));
-          }
-        } else {
-          // 【英文翻中文】：短詞防斷行適配（<= 8 字元給予自適應寬度安全保障）
-          if (cleanTrans.length <= 8) {
-            const characterWidthEst = (zhCount * 12.0 + enCount * 6.5) + 8;
-            const paddingBonus = Math.max(8, Math.min(22, boxW * 0.35));
-            boxW = Math.max(boxW + paddingBonus, characterWidthEst);
-          } else {
-            boxW = boxW + 6;
-          }
-        }
 
         const bgColor = sampleBgColorFromCtx(
           sampleCtx,
@@ -553,48 +515,7 @@ function App() {
       sampleCanvas.width = 0;
       sampleCanvas.height = 0;
 
-      // 【嚴密 2D Bounding Box NMS 去重演算法】：
-      // 徹底解決 OCR 重複偵測同一行、同句文字位移重疊（疊字、殘影）的嚴重問題
-      const result: TranslationLine[] = [];
-      for (const current of resultBeforeFilter) {
-        let isDuplicate = false;
-        for (const accepted of result) {
-          const overlapX = Math.max(0, Math.min(current.x + current.width, accepted.x + accepted.width) - Math.max(current.x, accepted.x));
-          const overlapY = Math.max(0, Math.min(current.y + current.height, accepted.y + accepted.height) - Math.max(current.y, accepted.y));
-          const minW = Math.min(current.width, accepted.width);
-          const minH = Math.min(current.height, accepted.height);
-          const xRatio = minW > 0 ? overlapX / minW : 0;
-          const yRatio = minH > 0 ? overlapY / minH : 0;
-          const cyDiff = Math.abs((current.y + current.height / 2) - (accepted.y + accepted.height / 2));
-          
-          const isTextSimilar = current.translated === accepted.translated 
-            || current.original === accepted.original
-            || (current.translated.length >= 3 && accepted.translated.includes(current.translated))
-            || (accepted.translated.length >= 3 && current.translated.includes(accepted.translated));
-          
-          // 若 X 軸重疊 > 45% 且 Y 軸重疊 > 25%，或者文字高度相似且 Y 軸中心非常接近，判定為重複疊字/陰影框
-          if ((xRatio > 0.45 && yRatio > 0.25) || (isTextSimilar && cyDiff < minH * 0.80)) {
-            // 保留譯文較長、較完整且外框涵蓋範圍較大者
-            if (current.translated.length > accepted.translated.length) {
-              accepted.translated = current.translated;
-              accepted.original = current.original;
-            }
-            accepted.x = Math.min(accepted.x, current.x);
-            accepted.y = Math.min(accepted.y, current.y);
-            accepted.width = Math.max(accepted.width, current.width);
-            accepted.height = Math.max(accepted.height, current.height);
-            isDuplicate = true;
-            break;
-          }
-        }
-        if (!isDuplicate) {
-          result.push(current);
-        }
-      }
-
-      console.log(`[過濾] 從未過濾前 ${resultBeforeFilter.length} 行，精細篩除冗餘碎片剩餘 ${result.length} 行。`);
-      setTranslations(result);
-      setResultSelection(activeSelection);
+      setTranslations(resultBeforeFilter);
       setCopied(false);
       setMode("result");
     } catch (err) {
@@ -823,17 +744,8 @@ function App() {
         <div className="selection-rect" style={{ left: selection.x, top: selection.y, width: selection.width, height: selection.height }} />
       )}
 
-      {mode === "result" && translations.length > 0 && resultSelection && (
-        // clipping container：嚴格限制在選取範圍，overflow hidden
-        <div style={{
-          position: "absolute",
-          left: resultSelection.x - 30, // 左右與上下給予充足的溢位溢出緩衝區，杜絕部分被微調加寬加高的翻譯方塊（尤其短字）被 Clipping 容器直接裁截掉、而露出原圖的視覺瑕疵！
-          top: resultSelection.y - 15,
-          width: resultSelection.width + (transDir === "zh-en" ? 120 : 60),
-          height: resultSelection.height + 30,
-          overflow: "hidden",
-          pointerEvents: "none",
-        }}>
+      {mode === "result" && translations.length > 0 && (
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
           {translations.map((t, i) => {
             const targetLang = transDir === "zh-en" ? "en" : "zh";
             const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height, targetLang);
@@ -850,8 +762,8 @@ function App() {
                   navigator.clipboard.writeText(t.translated).catch(console.error);
                 }}
                 style={{
-                  left: t.x - resultSelection.x + 30 - padX,
-                  top: t.y - resultSelection.y + 15 - padY,
+                  left: t.x - padX,
+                  top: t.y - padY,
                   width: t.width + padX * 2,
                   height: t.height + padY * 2,
                   fontSize: dynamicFontSize,
