@@ -167,60 +167,23 @@ function sampleBgColorFromCtx(
 }
 
 // 根據文字長度、寬度、高度，以及目前翻譯目標語言 (中文或英文)，動態計算最適合、最清晰舒適的字型大小
-function getAutoFontSize(text: string, width: number, height: number, targetLang: string): string {
-  if (!text) return "11px";
-  
-  let zhChars = 0;
-  let enChars = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) > 127) {
-      zhChars++;
-    } else {
-      enChars++;
-    }
-  }
-
+function getAutoFontSize(_text: string, _width: number, height: number, targetLang: string): string {
   const isZh = targetLang === "zh";
 
   if (isZh) {
     // 英文翻中文 (en-zh)：
-    // 一般段落文字 height 約 14~20px，基準字體設為 height * 0.68；
+    // 一般段落文字 height 約 14~20px，基準字體設為 height * 0.62；
     // 按鈕或輸入框高度常有 30~38px，上限限制為 14.5px 避免短詞字體暴衝。
-    const isSmallUiElement = height < 40 && width < 240;
-    const baseSize = isSmallUiElement
-      ? Math.max(9.5, Math.min(height * 0.60, 14.5))
-      : Math.max(10.0, Math.min(height * 0.68, 28.0));
-
-    const singleCharWidth = 1.0;  // 中文字方形寬度比例
-    const asciiCharWidth = 0.55;  // 半形字元寬度
-    const totalUnits = Math.max(1, zhChars * singleCharWidth + enChars * asciiCharWidth);
-    const expectedWidth = totalUnits * baseSize;
-
-    // 當文字總寬超過容器寬度時，等比縮小字體以保持單行完整放入
-    if (expectedWidth > width - 6) {
-      const fitSize = (width - 6) / totalUnits;
-      // 中文保底字體提高至 10.5px，確保複雜筆畫清晰可辨
-      return `${Math.max(10.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
-    }
+    const baseSize = height < 40
+      ? Math.max(10.0, Math.min(height * 0.62, 14.5))
+      : Math.max(10.5, Math.min(height * 0.68, 28.0));
     return `${baseSize.toFixed(1)}px`;
   } else {
     // 中文翻英文 (zh-en)：
-    // 英文小寫字母 x-height 較小，同樣 px 視覺上比漢字小，因此提高 baseSize 比例與保底字號
-    const isSmallUiElement = height < 40 && width < 300;
-    const baseSize = isSmallUiElement
+    // 英文小寫字母 x-height 較小，同樣 px 視覺上比漢字小，因此基準設為 height * 0.68
+    const baseSize = height < 40
       ? Math.max(11.0, Math.min(height * 0.68, 15.5))
       : Math.max(11.5, Math.min(height * 0.72, 28.0));
-
-    const singleCharWidth = 0.95;
-    const asciiCharWidth = 0.52;
-    const totalUnits = Math.max(1, zhChars * singleCharWidth + enChars * asciiCharWidth);
-    const expectedWidth = totalUnits * baseSize;
-
-    if (expectedWidth > width - 4) {
-      const fitSize = (width - 4) / totalUnits;
-      // 英文保底提升至 11.0px，徹底杜絕縮成微米無法辨認的字體
-      return `${Math.max(11.0, Math.min(baseSize, fitSize)).toFixed(1)}px`;
-    }
     return `${baseSize.toFixed(1)}px`;
   }
 }
@@ -764,7 +727,9 @@ function App() {
                 style={{
                   left: t.x - padX,
                   top: t.y - padY,
-                  width: t.width + padX * 2,
+                  minWidth: t.width + padX * 2,
+                  width: "max-content",
+                  maxWidth: `calc(100vw - ${Math.round(t.x - padX)}px - 10px)`,
                   height: t.height + padY * 2,
                   fontSize: dynamicFontSize,
                   background: t.bgColor,
@@ -775,7 +740,8 @@ function App() {
                   wordBreak: "keep-all",
                   overflow: "hidden",
                   letterSpacing: targetLang === "zh" ? "0.01em" : "-0.01em",
-                  fontWeight: targetLang === "zh" ? 500 : 500,
+                  fontWeight: 500,
+                  zIndex: 10,
                 }}
               >
                 {t.translated}
