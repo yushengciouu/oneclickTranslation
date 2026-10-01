@@ -13,7 +13,7 @@ const DEFAULT_SETTINGS = {
   apiUrl: "http://192.168.39.143:8001",
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
-  ocrEngine: "windows" as OcrEngine,
+  ocrEngine: "offline" as OcrEngine,
 };
 
 interface AppSettings {
@@ -26,7 +26,17 @@ interface AppSettings {
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // 若為舊版設定升級，自動將預設 OCR 引擎切換為 PP-OCRv5
+      const hasEngineVersion = localStorage.getItem("screen-translator-engine-version");
+      if (!hasEngineVersion) {
+        localStorage.setItem("screen-translator-engine-version", "v5");
+        parsed.ocrEngine = "offline";
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(parsed));
+      }
+      return { ...DEFAULT_SETTINGS, ...parsed };
+    }
   } catch { /* ignore */ }
   return { ...DEFAULT_SETTINGS };
 }
@@ -189,7 +199,8 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
     // 當文字總寬超過容器寬度時，等比縮小字體以保持單行完整放入
     if (expectedWidth > width - 6) {
       const fitSize = (width - 6) / totalUnits;
-      return `${Math.max(8.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+      // 中文保底字體提高至 10.5px，確保複雜筆畫清晰可辨
+      return `${Math.max(10.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
     }
     return `${baseSize.toFixed(1)}px`;
   } else {
@@ -207,19 +218,19 @@ function getAutoFontSize(text: string, width: number, height: number, targetLang
 
     if (expectedWidth > width - 4) {
       const fitSize = (width - 4) / totalUnits;
-      // 保底提升至 10.5px，徹底杜絕縮成微米無法辨認的字體
-      return `${Math.max(10.5, Math.min(baseSize, fitSize)).toFixed(1)}px`;
+      // 英文保底提升至 11.0px，徹底杜絕縮成微米無法辨認的字體
+      return `${Math.max(11.0, Math.min(baseSize, fitSize)).toFixed(1)}px`;
     }
     return `${baseSize.toFixed(1)}px`;
   }
 }
 
-// 根據背景亮度選擇黑或白文字
+// 根據背景亮度選擇深灰或柔白文字（避免刺眼純黑純白）
 function contrastColor(bg: string): string {
   const m = bg.match(/\d+/g);
-  if (!m || m.length < 3) return "#000000";
+  if (!m || m.length < 3) return "#18181b";
   const lum = (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255;
-  return lum > 0.5 ? "#000000" : "#ffffff";
+  return lum > 0.5 ? "#18181b" : "#f4f4f5";
 }
 
 function cropImage(src: string, rect: Rect, padding = 32): Promise<{ dataUrl: string; padX: number; padY: number }> {
@@ -726,19 +737,19 @@ function App() {
                     <input
                       type="radio"
                       name="ocrEngine"
-                      checked={draftSettings.ocrEngine !== "offline"}
-                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
+                      checked={draftSettings.ocrEngine === "offline"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
                     />
-                    <span>Windows OCR</span>
+                    <span>PP-OCRv5</span>
                   </label>
                   <label className="ocr-engine-option">
                     <input
                       type="radio"
                       name="ocrEngine"
-                      checked={draftSettings.ocrEngine === "offline"}
-                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
+                      checked={draftSettings.ocrEngine === "windows"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
                     />
-                    <span>PP-OCRv5</span>
+                    <span>Windows OCR</span>
                   </label>
                 </div>
               </label>
@@ -826,24 +837,35 @@ function App() {
           {translations.map((t, i) => {
             const targetLang = transDir === "zh-en" ? "en" : "zh";
             const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height, targetLang);
-            // 加上上下左右少許 padding/margin 偏移與尺寸膨脹補貼，確保完美蓋住原文
-            const paddingOffset = 1.0; 
+            // 加上左右 2.5px、上下 1.5px 膨脹補貼，並加上與背景同色的 1px 擴散光暈，100% 徹底蓋住抗鋸齒毛邊
+            const padX = 2.5;
+            const padY = 1.5;
             return (
-              <div key={i} className="translation-box" title={t.translated} style={{
-                left: t.x - resultSelection.x + 30 - paddingOffset,
-                top: t.y - resultSelection.y + 15 - paddingOffset,
-                width: t.width + paddingOffset * 2,
-                height: t.height + paddingOffset * 2,
-                fontSize: dynamicFontSize,
-                background: t.bgColor,
-                color: t.textColor,
-                lineHeight: 1.15,
-                whiteSpace: "nowrap",
-                wordBreak: "keep-all",
-                overflow: "hidden",
-                letterSpacing: targetLang === "zh" ? "0.01em" : "-0.01em",
-                fontWeight: targetLang === "zh" ? 500 : 500,
-              }}>
+              <div
+                key={i}
+                className="translation-box"
+                title={`原文: ${t.original}\n譯文: ${t.translated}\n(懸浮可透視原文 / 點擊複製此行)`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard.writeText(t.translated).catch(console.error);
+                }}
+                style={{
+                  left: t.x - resultSelection.x + 30 - padX,
+                  top: t.y - resultSelection.y + 15 - padY,
+                  width: t.width + padX * 2,
+                  height: t.height + padY * 2,
+                  fontSize: dynamicFontSize,
+                  background: t.bgColor,
+                  color: t.textColor,
+                  boxShadow: `0 0 1px 1px ${t.bgColor}`,
+                  lineHeight: 1.15,
+                  whiteSpace: "nowrap",
+                  wordBreak: "keep-all",
+                  overflow: "hidden",
+                  letterSpacing: targetLang === "zh" ? "0.01em" : "-0.01em",
+                  fontWeight: targetLang === "zh" ? 500 : 500,
+                }}
+              >
                 {t.translated}
               </div>
             );

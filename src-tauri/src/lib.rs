@@ -125,7 +125,7 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
     if let Some(engine) = ENGINE.get() {
         return Ok(engine);
     }
-    emit_ocr_status("正在載入內建離線辨識引擎...");
+    emit_ocr_status("正在載入 PP-OCRv5 辨識引擎...");
     let built = oar_ocr::oarocr::OAROCRBuilder::new(
         MODEL_DET_BYTES.to_vec(),
         MODEL_REC_BYTES.to_vec(),
@@ -133,12 +133,12 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
     )
     .character_dict_content(MODEL_DICT_STR)
     .build()
-    .map_err(|e| format!("離線 OCR 模型載入失敗：{e}"))?;
+    .map_err(|e| format!("PP-OCRv5 模型載入失敗：{e}"))?;
     let _ = ENGINE.set(Mutex::new(built));
-    emit_ocr_status("離線辨識引擎已就緒");
+    emit_ocr_status("PP-OCRv5 辨識引擎已就緒");
     ENGINE
         .get()
-        .ok_or_else(|| "離線 OCR 引擎初始化失敗".to_string())
+        .ok_or_else(|| "PP-OCRv5 引擎初始化失敗".to_string())
 }
 
 fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
@@ -159,10 +159,10 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
     let engine = offline_engine()?;
     let guard = engine
         .lock()
-        .map_err(|_| "離線 OCR 引擎忙碌中".to_string())?;
+        .map_err(|_| "PP-OCRv5 引擎忙碌中".to_string())?;
     let results = guard
         .predict(vec![rgb])
-        .map_err(|e| format!("離線 OCR 辨識失敗：{e}"))?;
+        .map_err(|e| format!("PP-OCRv5 辨識失敗：{e}"))?;
     drop(guard);
 
     let regions = results
@@ -354,7 +354,7 @@ async fn ocr_image(
         .decode(&data_str)
         .map_err(|e| e.to_string())?;
 
-    let engine = ocr_engine.unwrap_or_else(|| "windows".to_string());
+    let engine = ocr_engine.unwrap_or_else(|| "offline".to_string());
     if engine == "offline" {
         return tokio::task::spawn_blocking(move || ocr_with_offline(&image_data))
             .await

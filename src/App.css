@@ -403,9 +403,10 @@ button {
 /* 翻譯覆蓋框（背景色與文字色由 JS 動態設定） */
 .translation-box {
   position: absolute;
-  border-radius: 2px;
+  border-radius: 3px;
   padding: 1px 3px;
-  pointer-events: none;
+  pointer-events: auto;     /* 允許懸浮與點擊互動 */
+  cursor: pointer;
   display: flex;
   flex-direction: column;   /* 設為 column 結合 justify-content: center */
   justify-content: center;  /* 讓翻譯後的內容在原始區塊內垂直居中對齊 */
@@ -418,6 +419,13 @@ button {
   word-break: keep-all;
   overflow: hidden;         /* 防止超出邊界擠壓相鄰區域 */
   text-align: left;         /* 靠左對齊，防範中心偏移感 */
+  user-select: text;        /* 允許選取文字 */
+  transition: opacity 0.18s cubic-bezier(0.4, 0, 0.2, 1), transform 0.15s ease;
+}
+
+/* 滑鼠懸浮時半透明透視原文，移開秒速恢復覆蓋 */
+.translation-box:hover {
+  opacity: 0.15 !important;
 }
 
 /* 處理中遮罩 */
