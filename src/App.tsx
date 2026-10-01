@@ -85,16 +85,17 @@ interface TranslationLine {
   textColor: string;
 }
 
-// 從截圖取樣 bounding box 的主導背景色（排除前景文字雜訊）
-function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h: number): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext("2d");
+// 從共用 Canvas 取樣 bounding box 的主導背景色（排除前景文字雜訊，單一 Canvas 複用）
+function sampleBgColorFromCtx(
+  ctx: CanvasRenderingContext2D | null,
+  W: number,
+  H: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): string {
   if (!ctx) return "#ffffff";
-  ctx.drawImage(img, 0, 0);
-
-  const W = img.naturalWidth, H = img.naturalHeight;
   const rx = Math.max(0, Math.min(Math.round(x), W - 1));
   const ry = Math.max(0, Math.min(Math.round(y), H - 1));
   const rw = Math.max(1, Math.min(Math.round(w), W - rx));
@@ -104,7 +105,9 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
     const d = ctx.getImageData(rx, ry, rw, rh).data;
     const colors: { r: number; g: number; b: number; lum: number }[] = [];
     
-    for (let i = 0; i < d.length; i += 4) {
+    // 大區域時採用步長抽樣，大幅加速計算
+    const step = d.length > 4000 ? 8 : 4;
+    for (let i = 0; i < d.length; i += step) {
       const r = d[i];
       const g = d[i + 1];
       const b = d[i + 2];
@@ -118,8 +121,8 @@ function sampleBgColor(img: HTMLImageElement, x: number, y: number, w: number, h
 
     // 使用偏向兩極群組中位數統計：
     // 在有文字的地方，像素中不是背景色（佔大多數）就是文字筆劃顏色（佔少數，且通常是深黑或純白等極端顏色）。
-    // 我們先找出亮度的中位數，如果是亮背景（中位數 > 127），背景色會集中在亮端，進一步取 35% ~ 90% 的平均；
-    // 如果是暗背景（中位數 <= 127），背景色集中在暗端，進一步取 10% ~ 65% 的平均。
+    // 我們先找出亮度的中位數，如果是亮背景（中位數 > 127），背景色會集中在亮端，進一步取 35% ~ 95% 的平均；
+    // 如果是暗背景（中位數 <= 127），背景色集中在暗端，進一步取 5% ~ 65% 的平均。
     // 這能達到近乎完美地排乾除文字筆劃（反差極端色）雜訊，還原最真實的背景純色！
     colors.sort((a, b) => a.lum - b.lum);
     const medianLum = colors[Math.floor(colors.length / 2)].lum;
@@ -438,6 +441,15 @@ function App() {
       // Step 3：座標換算（OCR 回傳的是相對於 cropped 帶有 padX/padY 安全緩衝的原生像素）
       //         因為裁切使用了絕對對齊的 activeSelection（無 Pad 偏移），
       //         所以換算回全螢幕 CSS pixels 時，直接百分之百等比對齊！
+      // 【效能極致優化】：建立單一取樣畫布（willReadFrequently 啟用瀏覽器硬體讀取加速），避免每行文字重複建立 4K Canvas 重繪
+      const sampleCanvas = document.createElement("canvas");
+      sampleCanvas.width = imgEl.naturalWidth;
+      sampleCanvas.height = imgEl.naturalHeight;
+      const sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+      if (sampleCtx) {
+        sampleCtx.drawImage(imgEl, 0, 0);
+      }
+
       const resultBeforeFilter = ocrLines.map((line, i) => {
         // 先減去 padX/padY 還原為 cropped 之前無 Padding 的純物理座標，再換算為絕對螢幕 CSS 座標
         // cropX0 是裁切起始點（原生像素），除以 scaleX 得 CSS 像素的起始偏移
@@ -507,8 +519,10 @@ function App() {
           }
         }
 
-        const bgColor = sampleBgColor(
-          imgEl,
+        const bgColor = sampleBgColorFromCtx(
+          sampleCtx,
+          imgEl.naturalWidth,
+          imgEl.naturalHeight,
           boxX * scaleX, fy * scaleY,
           boxW * scaleX, Math.max(1, fh * scaleY),
         );
@@ -523,6 +537,10 @@ function App() {
           textColor: contrastColor(bgColor),
         };
       }).filter((t): t is TranslationLine => t !== null);
+
+      // 釋放共用取樣畫布記憶體
+      sampleCanvas.width = 0;
+      sampleCanvas.height = 0;
 
       // 【嚴密 2D Bounding Box NMS 去重演算法】：
       // 徹底解決 OCR 重複偵測同一行、同句文字位移重疊（疊字、殘影）的嚴重問題

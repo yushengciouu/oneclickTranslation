@@ -610,6 +610,29 @@ async fn ocr_image(
     .map_err(|e| e.to_string())?
 }
 
+/// 全域複用 HTTP 用戶端，啟用 TCP 連線池 (Keep-Alive) 並設定合理連線與請求超時
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(45))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+fn format_reqwest_error(e: reqwest::Error, endpoint: &str) -> String {
+    if e.is_timeout() {
+        "翻譯伺服器連線超時（超過 45 秒無回應），請檢查翻譯模型伺服器是否卡頓或正常運行".to_string()
+    } else if e.is_connect() {
+        format!("無法連線至翻譯伺服器 ({})，請確認 API 網址是否正確或網路/防火牆是否阻擋", endpoint)
+    } else {
+        format!("翻譯請求失敗: {}", e)
+    }
+}
+
 #[tauri::command]
 async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: String, model: String) -> Result<Vec<String>, String> {
     // 嚴格高抗干擾錨定格式 (Strong-Anchored Tagged Format)：
@@ -649,7 +672,7 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
             n
         )
     };
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -668,8 +691,8 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        .map_err(|e| format_reqwest_error(e, &endpoint))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析伺服器回應 JSON 失敗: {}", e))?;
     let content = json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or("Invalid model response")?
@@ -810,7 +833,7 @@ async fn vision_ocr_translate(image_base64: String, api_url: String, model: Stri
         image_base64
     };
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "model": model,
         "messages": [{
@@ -840,9 +863,9 @@ async fn vision_ocr_translate(image_base64: String, api_url: String, model: Stri
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_reqwest_error(e, &endpoint))?;
 
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析視覺模型回應 JSON 失敗: {}", e))?;
     let translated = json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or("Invalid model response")?
