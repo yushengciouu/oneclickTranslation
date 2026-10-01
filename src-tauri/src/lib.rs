@@ -186,6 +186,51 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
         if width < 2.0 || height < 2.0 {
             continue;
         }
+
+        // 做法 A：UI 圖示雜訊精準過濾 (Icon Artifact Filter)
+        let char_count = text.chars().count();
+        if char_count == 1 {
+            let ch = text.chars().next().unwrap();
+            let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&ch)
+                || ('\u{3400}'..='\u{4dbf}').contains(&ch)
+                || ('\u{f900}'..='\u{faff}').contains(&ch);
+
+            let aspect_ratio = width / height;
+            let is_square = (0.65..=1.55).contains(&aspect_ratio);
+
+            if is_cjk {
+                // 單個中文字：真實漢字的信心度通常 > 0.85，若信心度過低 (< 0.60) 可能是幾何圖形誤判
+                if confidence < 0.60 {
+                    continue;
+                }
+            } else {
+                // 非中文字（符號或單一英文字母/數字）
+                let is_symbol = !ch.is_alphanumeric();
+                if is_symbol {
+                    // 標點/幾何符號（如 >, ✓, -, •, *, |, _ 等）：若為方形圖標或信心度未達 0.88，直接剔除
+                    if is_square || confidence < 0.88 {
+                        continue;
+                    }
+                } else {
+                    // 英文字母/數字：英文中除 'A'、'I'、'a' 外，孤立單字母在 UI 中幾乎 100% 為 UI 圖示誤認（如 🔍->Q、⚙->o、✕->x）
+                    let is_valid_word = ch == 'A' || ch == 'I' || ch == 'a';
+                    if !is_valid_word {
+                        if is_square || confidence < 0.80 {
+                            continue;
+                        }
+                    } else if is_square && confidence < 0.85 {
+                        continue;
+                    }
+                }
+            }
+        } else if char_count == 2 {
+            // 2 字元的純符號圖示雜訊（如 ">>", "->", "--", "==", ".." 等）
+            let all_symbols = text.chars().all(|c| !c.is_alphanumeric());
+            if all_symbols && confidence < 0.85 {
+                continue;
+            }
+        }
+
         let line = OcrLine {
             text: text.to_string(),
             x: (x0 as f64 / scale).clamp(0.0, w as f64),
@@ -227,117 +272,18 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
         }
     }
 
-    // 1. 同水平行聚類分組與相鄰詞塊合併演算法 (Row Grouping & Same-Line Merge)
-    // 嚴格限制：
-    // - 垂直中心 Y 差距在字高的 35% 以內
-    // - 同一水平行的各區塊在 X 軸上不得有顯著重疊（有重疊代表是一上一下的兩行，禁止進同一行）
+    // 依 Y 軸由上至下、X 軸由左至右排序，保持 100% 原始 OCR 切片定位（不強制合併相鄰詞塊，杜絕圖示與跨欄誤吸）
     lines.sort_by(|a, b| {
-        let cy_a = a.y + a.height / 2.0;
-        let cy_b = b.y + b.height / 2.0;
-        cy_a.partial_cmp(&cy_b).unwrap_or(std::cmp::Ordering::Equal)
+        let diff_y = a.y - b.y;
+        let h = a.height.min(b.height);
+        if diff_y.abs() < h * 0.5 {
+            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal)
+        }
     });
 
-    struct RowGroup {
-        avg_cy: f64,
-        items: Vec<OcrLine>,
-    }
-
-    let mut rows: Vec<RowGroup> = Vec::new();
-    for line in lines {
-        let cy = line.y + line.height / 2.0;
-        let h = line.height;
-
-        let matched_row = rows.iter_mut().find(|r| {
-            // 垂直距離必須非常接近（字高 35% 以內）
-            let y_close = (r.avg_cy - cy).abs() < h.max(12.0) * 0.35;
-            if !y_close {
-                return false;
-            }
-            // 同一行內的所有既有項目，絕對不能與新 line 在 X 軸上有重疊（超過 15% 重疊即視為垂直堆疊不同行）
-            let has_x_overlap = r.items.iter().any(|item| {
-                let ox = (line.x + line.width).min(item.x + item.width) - line.x.max(item.x);
-                let min_w = line.width.min(item.width);
-                ox > 0.0 && min_w > 0.0 && (ox / min_w) > 0.15
-            });
-            !has_x_overlap
-        });
-
-        if let Some(row) = matched_row {
-            let count = row.items.len() as f64;
-            row.avg_cy = (row.avg_cy * count + cy) / (count + 1.0);
-            row.items.push(line);
-        } else {
-            rows.push(RowGroup {
-                avg_cy: cy,
-                items: vec![line],
-            });
-        }
-    }
-
-    // 依照行的平均 Y 軸由上至下嚴格排序
-    rows.sort_by(|a, b| a.avg_cy.partial_cmp(&b.avg_cy).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut merged_lines = Vec::new();
-    for mut row in rows {
-        // 同一行內的單字/詞塊，嚴格按 X 座標由左至右排序
-        row.items.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut row_merged: Vec<OcrLine> = Vec::new();
-        for item in row.items {
-            if let Some(prev) = row_merged.last_mut() {
-                let prev_right = prev.x + prev.width;
-                let gap = item.x - prev_right;
-                let max_h = prev.height.max(item.height);
-
-                // 若 X 軸有負重疊（gap < -4.0），代表仍是重複/陰影偵測框，取文字長者去重
-                if gap < -4.0 {
-                    if item.text.len() > prev.text.len() {
-                        *prev = item;
-                    }
-                    continue;
-                }
-
-                // 合併間距大幅收緊：正常英文字詞空格僅 3~8px。
-                // 只有在 -4.0 <= gap <= 10.0 且 gap <= max_h * 0.75 時才視為同句單字合併，
-                // 絕不跨越 20~40px 的欄位間距（Column Gutter）去誤合併隔壁新聞卡片！
-                if gap >= -4.0 && gap <= 10.0 && gap <= max_h * 0.75 {
-                    let new_text = {
-                        let l_trimmed = prev.text.trim();
-                        let r_trimmed = item.text.trim();
-                        let last_ch = l_trimmed.chars().last();
-                        let first_ch = r_trimmed.chars().next();
-                        if let (Some(l_c), Some(r_c)) = (last_ch, first_ch) {
-                            if l_c.is_ascii_alphanumeric() && r_c.is_ascii_alphanumeric() {
-                                format!("{} {}", l_trimmed, r_trimmed)
-                            } else if l_c.is_ascii() && r_c.is_ascii() && !l_c.is_whitespace() && !r_c.is_whitespace() {
-                                format!("{} {}", l_trimmed, r_trimmed)
-                            } else {
-                                format!("{}{}", l_trimmed, r_trimmed)
-                            }
-                        } else {
-                            format!("{}{}", l_trimmed, r_trimmed)
-                        }
-                    };
-
-                    let new_x = prev.x.min(item.x);
-                    let new_right = (prev.x + prev.width).max(item.x + item.width);
-                    let new_y = prev.y.min(item.y);
-                    let new_bottom = (prev.y + prev.height).max(item.y + item.height);
-
-                    prev.text = new_text;
-                    prev.x = new_x;
-                    prev.y = new_y;
-                    prev.width = new_right - new_x;
-                    prev.height = new_bottom - new_y;
-                    continue;
-                }
-            }
-            row_merged.push(item);
-        }
-        merged_lines.extend(row_merged);
-    }
-
-    Ok(merged_lines)
+    Ok(lines)
 }
 
 #[tauri::command]
