@@ -48,6 +48,8 @@ const LOCALE = {
     reselect: "重新選取",
     close: "關閉",
     translate: "翻譯",
+    copyBtn: "📋 複製譯文",
+    copiedBtn: "✓ 已複製",
     noText: "未辨識到任何文字",
     langToggle: "EN",
   },
@@ -61,6 +63,8 @@ const LOCALE = {
     reselect: "Reselect",
     close: "Close",
     translate: "Translate",
+    copyBtn: "📋 Copy Text",
+    copiedBtn: "✓ Copied",
     noText: "No text recognized",
     langToggle: "\u4e2d",
   },
@@ -278,6 +282,7 @@ function App() {
   const [draftSettings, setDraftSettings] = useState<AppSettings>(loadSettings);
   const [isRecording, setIsRecording] = useState(false);
   const [statusText, setStatusText] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const handleShortcutKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     e.preventDefault();
@@ -347,6 +352,7 @@ function App() {
     setTranslations([]);
     setResultSelection(null);
     setError(null);
+    setCopied(false);
   }, []);
 
   const handleToggle = useCallback(async (event?: any) => {
@@ -560,6 +566,7 @@ function App() {
       console.log(`[過濾] 從未過濾前 ${resultBeforeFilter.length} 行，精細篩除冗餘碎片剩餘 ${result.length} 行。`);
       setTranslations(result);
       setResultSelection(activeSelection);
+      setCopied(false);
       setMode("result");
     } catch (err) {
       setError(String(err));
@@ -588,6 +595,19 @@ function App() {
       setError(String(err));
     }
   }, [screenshot, handleTranslate]);
+
+  const handleCopyAll = useCallback(async () => {
+    if (translations.length === 0) return;
+    const allText = translations.map(t => t.translated).join("\n");
+    try {
+      await navigator.clipboard.writeText(allText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("複製失敗:", err);
+      setError("無法寫入剪貼簿");
+    }
+  }, [translations]);
 
   useEffect(() => {
     // 程式啟動時，自動讀取並向 Rust 註冊當前的用戶設定快捷鍵
@@ -836,7 +856,19 @@ function App() {
             </>
           )}
           {mode === "result" && (
-            <button className="btn-secondary" onClick={() => { setTranslations([]); setSelection(null); setMode("selecting"); }}>{t.reselect}</button>
+            <>
+              <button
+                className="btn-primary"
+                onClick={handleCopyAll}
+                style={{
+                  backgroundColor: copied ? "#2ecc71" : "#4f8ef7",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {copied ? t.copiedBtn : t.copyBtn}
+              </button>
+              <button className="btn-secondary" onClick={() => { setTranslations([]); setSelection(null); setMode("selecting"); setCopied(false); }}>{t.reselect}</button>
+            </>
           )}
           <button className="btn-danger" onClick={resetToIdle}>{t.close}</button>
         </div>
