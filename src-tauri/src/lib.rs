@@ -142,12 +142,35 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
 }
 
 fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
+    // 1. 2.0x 高解析度 Lanczos3 預處理：
+    // Windows 傳統點陣字型（如新細明體 9~12px）在 1x 原圖上筆劃極細，DBNet 神經網路特徵容易遺失（導致「工號」漏檢），
+    // 且單選圓圈 ⚪ 與文字間隙僅 2px，易發生連通塊沾黏（導致誤判為 CCP、C Shipping）。
+    // 透過 2.0x Lanczos3 高階插值放大，特徵空間增大 4 倍，大幅提高小字召回率並自然拉開圖標間隙。
+    let raw_img = screenshots::image::load_from_memory(image_data).map_err(|e| e.to_string())?;
+    let (w, h) = (raw_img.width(), raw_img.height());
+    let scale = 2.0f64;
+    let nw = (w as f64 * scale) as u32;
+    let nh = (h as f64 * scale) as u32;
+
+    let upscaled = screenshots::image::imageops::resize(
+        &raw_img.to_rgba8(),
+        nw,
+        nh,
+        screenshots::image::imageops::FilterType::Lanczos3,
+    );
+
+    let mut buf = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(upscaled)
+        .write_to(&mut buf, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let upscaled_bytes = buf.into_inner();
+
     // 寫成暫存 PNG 後用 oar-ocr 載入器讀回進行預測
     let temp_path = std::env::temp_dir().join(format!(
         "screen-translator-ocr-{}.png",
         std::process::id()
     ));
-    std::fs::write(&temp_path, image_data).map_err(|e| e.to_string())?;
+    std::fs::write(&temp_path, &upscaled_bytes).map_err(|e| e.to_string())?;
     let rgb = oar_ocr::utils::load_image(&temp_path).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&temp_path);
 
@@ -176,11 +199,23 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             continue;
         }
         let (x0, y0, x1, y1) = region.bounding_box.aabb();
-        let width = ((x1 - x0) as f64).max(1.0);
-        let height = ((y1 - y0) as f64).max(1.0);
-        if width < 2.0 || height < 2.0 {
+        let raw_w = ((x1 - x0) as f64 / scale).max(1.0);
+        let raw_h = ((y1 - y0) as f64 / scale).max(1.0);
+        if raw_w < 2.0 || raw_h < 2.0 {
             continue;
         }
+
+        // DBNet 多邊形擴張緊縮校正 (Bounding Box Inset / Tightening)：
+        // DBNet 預設因 Unclip 膨脹係數會使外框上下過於寬鬆（通常上下多出 3~5px），
+        // 在密集行距（行高僅 18~20px）的表單中會嚴重覆蓋上一行文字。
+        // 適度緊縮上下邊界約 12%（最大 2.5px），精確貼合 Windows 桌面文字的真實高度：
+        let tight_pad_y = (raw_h * 0.12).min(2.5);
+        let final_y = (y0 as f64 / scale) + tight_pad_y;
+        let final_h = (raw_h - tight_pad_y * 2.0).max(8.0);
+
+        let tight_pad_x = (raw_w * 0.03).min(2.0);
+        let final_x = (x0 as f64 / scale) + tight_pad_x;
+        let final_w = (raw_w - tight_pad_x * 2.0).max(4.0);
 
         // 做法 A：UI 圖示雜訊精準過濾 (Icon Artifact Filter)
         let char_count = text.chars().count();
@@ -190,7 +225,7 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
                 || ('\u{3400}'..='\u{4dbf}').contains(&ch)
                 || ('\u{f900}'..='\u{faff}').contains(&ch);
 
-            let aspect_ratio = width / height;
+            let aspect_ratio = final_w / final_h;
             let is_square = (0.65..=1.55).contains(&aspect_ratio);
 
             if is_cjk {
@@ -228,10 +263,10 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
 
         let line = OcrLine {
             text: text.to_string(),
-            x: x0 as f64,
-            y: y0 as f64,
-            width,
-            height,
+            x: final_x,
+            y: final_y,
+            width: final_w,
+            height: final_h,
         };
 
         // 嚴密 NMS：針對文字塊特性進行高精確度去重
