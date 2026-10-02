@@ -1102,10 +1102,19 @@ async fn translate_selection(
     api_url: String,
     model: String,
 ) -> Result<String, String> {
-    let text = text.trim();
-    if text.is_empty() {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         return Ok(String::new());
     }
+
+    // 後端強制安全硬上限：限制單次選取翻譯最大 2,000 字元，防止本地 LLM（如 31B 模型）因超長文字 OOM 或卡死
+    let capped_text;
+    let safe_text = if trimmed.chars().count() > 2000 {
+        capped_text = trimmed.chars().take(2000).collect::<String>();
+        &capped_text
+    } else {
+        trimmed
+    };
 
     let system_prompt = if target_lang == "zh" {
         "You are an expert bilingual translator. Translate the given text into fluent, natural Traditional Chinese (Taiwan style, 臺灣用語).\n\
@@ -1126,7 +1135,7 @@ async fn translate_selection(
         "model": model,
         "messages": [
             { "role": "system", "content": system_prompt },
-            { "role": "user", "content": text }
+            { "role": "user", "content": safe_text }
         ],
         "temperature": 0.2
     });

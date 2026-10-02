@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
   ocrEngine: "offline",
+  maxSelectionChars: 800,
 };
 
 export function QuickTranslate() {
@@ -18,6 +19,11 @@ export function QuickTranslate() {
   const [isPinned, setIsPinned] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 字數限制保護狀態
+  const [isTruncated, setIsTruncated] = useState(false);
+  const [fullLength, setFullLength] = useState(0);
+  const [maxCharsLimit, setMaxCharsLimit] = useState(800);
 
   const isPinnedRef = useRef(false);
   isPinnedRef.current = isPinned;
@@ -68,17 +74,30 @@ export function QuickTranslate() {
     text = (text || "").trim();
     if (!text) return;
 
-    // 若文字相同且已有譯文，避免無謂重複呼叫 LLM
-    if (text === currentTextRef.current && translatedText) return;
+    // 取得自訂字數上限保護本地模型（限制安全範圍 100 ~ 2,000 字元，預設 800 字）
+    const settings = getSettings();
+    const rawLimit = settings.maxSelectionChars || 800;
+    const maxLimit = Math.min(2000, Math.max(100, rawLimit));
+    const overLimit = text.length > maxLimit;
 
-    setOriginalText(text);
+    setIsTruncated(overLimit);
+    setFullLength(text.length);
+    setMaxCharsLimit(maxLimit);
+
+    // 若超過字數限制，自動截斷前段文字，保護本地 LLM 免於記憶體爆滿或嚴重卡頓
+    const textToTranslate = overLimit ? text.slice(0, maxLimit) : text;
+
+    // 若文字相同且已有譯文，避免無謂重複呼叫 LLM
+    if (textToTranslate === currentTextRef.current && translatedText) return;
+
+    setOriginalText(textToTranslate);
     setCopied(false);
 
     // 智慧語系判定：若選取文字中文字元佔比高於 25%，自動切換中翻英；否則為英翻繁中
-    const chineseCharCount = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-    const detectedTarget: "zh" | "en" = chineseCharCount > text.length * 0.25 ? "en" : "zh";
+    const chineseCharCount = (textToTranslate.match(/[\u4e00-\u9fa5]/g) || []).length;
+    const detectedTarget: "zh" | "en" = chineseCharCount > textToTranslate.length * 0.25 ? "en" : "zh";
     setTargetLang(detectedTarget);
-    doTranslate(text, detectedTarget);
+    doTranslate(textToTranslate, detectedTarget);
   }, [translatedText]);
 
   // 元件掛載時立即主動取得最新文字
@@ -197,7 +216,14 @@ export function QuickTranslate() {
         <div className="quick-card original-card">
           <div className="quick-card-header">
             <span className="label">選取原文</span>
-            <span className="count">{originalText.length} 字</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              {isTruncated && (
+                <span className="warning-tag" title={`原文共 ${fullLength} 字，已自動截取前 ${maxCharsLimit} 字以保護本地 LLM`}>
+                  ⚠️ 限制前 {maxCharsLimit} 字（共 {fullLength} 字）
+                </span>
+              )}
+              <span className="count">{originalText.length} 字</span>
+            </div>
           </div>
           <div className="quick-text original-text">
             {originalText || "（尚未收到選取文字，請反白文字後，按著 Ctrl 不放並連按兩次 C）"}

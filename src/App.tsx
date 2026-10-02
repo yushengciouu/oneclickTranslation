@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
   shortcut: "Ctrl+Shift+T",
   ocrEngine: "offline" as OcrEngine,
   doubleCtrlC: true,
+  maxSelectionChars: 800,
 };
 
 interface AppSettings {
@@ -24,6 +25,7 @@ interface AppSettings {
   shortcut: string;
   ocrEngine: OcrEngine;
   doubleCtrlC?: boolean;
+  maxSelectionChars?: number;
 }
 
 function loadSettings(): AppSettings {
@@ -830,14 +832,49 @@ function App() {
                   </label>
                 </div>
               </label>
+              <label>
+                劃詞翻譯字數上限 / Max Selection Characters
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "6px" }}>
+                  <input
+                    type="number"
+                    min={100}
+                    max={2000}
+                    step={100}
+                    value={draftSettings.maxSelectionChars || 800}
+                    onChange={e => {
+                      const val = parseInt(e.target.value);
+                      if (isNaN(val)) {
+                        setDraftSettings(s => ({ ...s, maxSelectionChars: 800 }));
+                      } else {
+                        const clamped = Math.min(2000, Math.max(100, val));
+                        setDraftSettings(s => ({ ...s, maxSelectionChars: clamped }));
+                      }
+                    }}
+                    style={{
+                      width: "110px",
+                      backgroundColor: "#2a2a3e",
+                      border: "1px solid #555",
+                      color: "#e0e0e0",
+                      padding: "8px 12px",
+                      borderRadius: "6px",
+                      fontSize: "0.9rem",
+                    }}
+                  />
+                  <span style={{ fontSize: "0.82rem", color: "#aaa" }}>
+                    字元（安全保護範圍：100 ~ 2,000 字，預設 800）
+                  </span>
+                </div>
+              </label>
               <div className="settings-actions">
                 <button className="btn-secondary" onClick={() => { setShowSettings(false); setIsRecording(false); }}>取消</button>
                 <button className="btn-primary" onClick={async () => {
                   try {
-                    await invoke("update_shortcut", { shortcutStr: draftSettings.shortcut });
-                    await invoke("set_double_ctrl_c_enabled", { enabled: draftSettings.doubleCtrlC !== false }).catch(console.error);
-                    saveSettings(draftSettings);
-                    setSettings(draftSettings);
+                    const clampedMax = Math.min(2000, Math.max(100, draftSettings.maxSelectionChars || 800));
+                    const finalSettings = { ...draftSettings, maxSelectionChars: clampedMax };
+                    await invoke("update_shortcut", { shortcutStr: finalSettings.shortcut });
+                    await invoke("set_double_ctrl_c_enabled", { enabled: finalSettings.doubleCtrlC !== false }).catch(console.error);
+                    saveSettings(finalSettings);
+                    setSettings(finalSettings);
                     setShowSettings(false);
                     setError(null);
                   } catch (err) {

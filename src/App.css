@@ -762,6 +762,16 @@ button {
   color: #666;
 }
 
+.warning-tag {
+  font-size: 9.5px;
+  color: #fdcb6e;
+  background: rgba(253, 203, 110, 0.15);
+  border: 1px solid rgba(253, 203, 110, 0.35);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
 .status-loading {
   color: #a29bfe;
   font-size: 11px;
