@@ -6,8 +6,20 @@ use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use windows::Win32::Foundation::{HINSTANCE, HWND, HGLOBAL, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_RCONTROL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
+    WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+};
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+static LAST_CTRL_C_TIME: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static DOUBLE_CTRL_C_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static LAST_SELECTION_TEXT: Mutex<String> = Mutex::new(String::new());
 
 /// 採用動態高階縮放演算法，為中低解析度、精細菜單或深色背景中細小中文字體進行高階插值（Lanczos3）放大。
 /// 由於邊緣自適應填充技術 (Adaptive Padding) 已經全部轉移至上層 React 實施（取得更加乾淨且
@@ -886,7 +898,258 @@ async fn update_shortcut(app_handle: tauri::AppHandle, shortcut_str: String) -> 
     Ok(())
 }
 
+fn get_clipboard_text() -> Option<String> {
+    unsafe {
+        let mut opened = false;
+        for _ in 0..4 {
+            if OpenClipboard(HWND(std::ptr::null_mut())).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        if !opened {
+            return None;
+        }
 
+        const CF_UNICODETEXT: u32 = 13;
+        let handle = match GetClipboardData(CF_UNICODETEXT) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = CloseClipboard();
+                return None;
+            }
+        };
+        let ptr = GlobalLock(HGLOBAL(handle.0));
+        if ptr.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let u16_ptr = ptr as *const u16;
+        let mut len = 0;
+        while *u16_ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(u16_ptr, len);
+        let text = String::from_utf16_lossy(slice);
+        let _ = GlobalUnlock(HGLOBAL(handle.0));
+        let _ = CloseClipboard();
+        Some(text)
+    }
+}
+
+unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if code >= 0 && DOUBLE_CTRL_C_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        let msg = w_param.0 as u32;
+        let kbd_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+
+        // 使用者放開 Ctrl 鍵時，立即清除計時狀態，確保必須在按住 Ctrl 的前提下按兩次 C
+        if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+            if kbd_struct.vkCode == VK_CONTROL.0 as u32
+                || kbd_struct.vkCode == VK_LCONTROL.0 as u32
+                || kbd_struct.vkCode == VK_RCONTROL.0 as u32
+            {
+                let mut last = LAST_CTRL_C_TIME.lock().unwrap();
+                *last = None;
+            }
+        }
+
+        if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+            // 0x43 代表字元 'C'
+            if kbd_struct.vkCode == 0x43 {
+                // 檢查是否持續按住 Ctrl（相容通用 CONTROL, LCONTROL, RCONTROL）
+                let ctrl_down = ((GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0)
+                    || ((GetAsyncKeyState(VK_LCONTROL.0 as i32) as u16 & 0x8000) != 0)
+                    || ((GetAsyncKeyState(VK_RCONTROL.0 as i32) as u16 & 0x8000) != 0);
+
+                if ctrl_down {
+                    let now = std::time::Instant::now();
+                    let mut last = LAST_CTRL_C_TIME.lock().unwrap();
+                    if let Some(prev) = *last {
+                        let elapsed = now.duration_since(prev).as_millis();
+                        // 雙擊時間區間：50ms ~ 650ms（按住 Ctrl 時連按兩次 C）
+                        if elapsed >= 50 && elapsed <= 650 {
+                            *last = None; // 成功觸發，重設狀態
+                            drop(last);
+
+                            if let Some(app) = APP_HANDLE.get() {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    trigger_selection_translate(&app).await;
+                                });
+                            }
+                        } else {
+                            *last = Some(now);
+                        }
+                    } else {
+                        *last = Some(now);
+                    }
+                }
+            }
+        }
+    }
+    CallNextHookEx(None, code, w_param, l_param)
+}
+
+fn setup_keyboard_hook() {
+    std::thread::spawn(|| {
+        unsafe {
+            let hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(low_level_keyboard_proc),
+                HINSTANCE(std::ptr::null_mut()),
+                0,
+            );
+            if let Ok(h) = hook {
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                let _ = UnhookWindowsHookEx(h);
+            }
+        }
+    });
+}
+
+async fn trigger_selection_translate(app: &AppHandle) {
+    // 稍候 100 毫秒，確保目前焦點程式已完成將選取反白內容寫入剪貼簿
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let text = match get_clipboard_text() {
+        Some(t) => t.trim().to_string(),
+        None => return,
+    };
+
+    if text.is_empty() {
+        return;
+    }
+
+    // 存入全域最新選取文字快取，防止前端渲染或事件漏失
+    *LAST_SELECTION_TEXT.lock().unwrap() = text.clone();
+
+    let mut pt = POINT { x: 0, y: 0 };
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+
+    if let Some(window) = app.get_webview_window("quick") {
+        let (mon_x, mon_y, mon_w, mon_h) = if let Ok(Some(monitor)) = window.current_monitor() {
+            (
+                monitor.position().x,
+                monitor.position().y,
+                monitor.size().width as i32,
+                monitor.size().height as i32,
+            )
+        } else {
+            (0, 0, 1920, 1080)
+        };
+
+        let win_width = 460;
+        let win_height = 340;
+
+        let mut target_x = pt.x + 12;
+        let mut target_y = pt.y + 16;
+
+        if target_x + win_width > mon_x + mon_w - 10 {
+            target_x = (pt.x - win_width - 12).max(mon_x + 10);
+        }
+        if target_y + win_height > mon_y + mon_h - 10 {
+            target_y = (pt.y - win_height - 16).max(mon_y + 10);
+        }
+
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: target_x,
+            y: target_y,
+        }));
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+
+        // 雙軌發送：全域廣播與視窗專屬發送
+        let _ = app.emit("selection-text", text.clone());
+        let _ = window.emit("selection-text", text);
+    }
+}
+
+#[tauri::command]
+fn get_latest_selection_text() -> String {
+    LAST_SELECTION_TEXT.lock().unwrap().clone()
+}
+
+#[tauri::command]
+async fn hide_quick_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_double_ctrl_c_enabled(enabled: bool) -> Result<(), String> {
+    DOUBLE_CTRL_C_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn translate_selection(
+    text: String,
+    target_lang: String,
+    api_url: String,
+    model: String,
+) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(String::new());
+    }
+
+    let system_prompt = if target_lang == "zh" {
+        "You are an expert bilingual translator. Translate the given text into fluent, natural Traditional Chinese (Taiwan style, 臺灣用語).\n\
+         Strict Guidelines:\n\
+         1. Maintain technical terms, brand names, code identifiers, acronyms, and proper nouns intact.\n\
+         2. Preserve formatting, line breaks, and paragraph structure.\n\
+         3. Return ONLY the translated text without conversational intro, markdown wrappers, or explanations."
+    } else {
+        "You are an expert bilingual translator. Translate the given text into fluent, natural, and idiomatic English.\n\
+         Strict Guidelines:\n\
+         1. Maintain technical terms, brand names, code identifiers, acronyms, and proper nouns intact.\n\
+         2. Preserve formatting, line breaks, and paragraph structure.\n\
+         3. Return ONLY the translated text without conversational intro, markdown wrappers, or explanations."
+    };
+
+    let client = http_client();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": text }
+        ],
+        "temperature": 0.2
+    });
+    let endpoint = if api_url.ends_with("/v1/chat/completions") {
+        api_url.clone()
+    } else {
+        format!("{}/v1/chat/completions", api_url.trim_end_matches('/'))
+    };
+    let resp = client
+        .post(&endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format_reqwest_error(e, &endpoint))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析伺服器回應 JSON 失敗: {}", e))?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("Invalid model response")?
+        .trim()
+        .to_string();
+
+    Ok(content)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1009,6 +1272,9 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // 啟動全域鍵盤監聽（支援 Ctrl + C + C 劃詞即時選取翻譯）
+            setup_keyboard_hook();
+
             // 註冊初次預設快速鍵 (在 React 接管並更新前做為安全後備碼)
             let shortcut =
                 Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyT);
@@ -1020,7 +1286,11 @@ pub fn run() {
             close_overlay,
             ocr_image,
             translate_lines,
-            update_shortcut
+            update_shortcut,
+            hide_quick_window,
+            set_double_ctrl_c_enabled,
+            translate_selection,
+            get_latest_selection_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

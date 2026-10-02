@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { QuickTranslate } from "./QuickTranslate";
 import "./App.css";
 
 type AppMode = "idle" | "selecting" | "selected" | "processing" | "result";
@@ -14,6 +15,7 @@ const DEFAULT_SETTINGS = {
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
   ocrEngine: "offline" as OcrEngine,
+  doubleCtrlC: true,
 };
 
 interface AppSettings {
@@ -21,6 +23,7 @@ interface AppSettings {
   model: string;
   shortcut: string;
   ocrEngine: OcrEngine;
+  doubleCtrlC?: boolean;
 }
 
 function loadSettings(): AppSettings {
@@ -311,6 +314,11 @@ function cropImage(src: string, rect: Rect, padding = 32): Promise<{ dataUrl: st
 }
 
 function App() {
+  const isQuickMode = window.location.search.includes("mode=quick");
+  if (isQuickMode) {
+    return <QuickTranslate />;
+  }
+
   const [mode, setMode] = useState<AppMode>("idle");
   const [lang, setLang] = useState<Lang>("zh");
   const [transDir, setTransDir] = useState<TransDir>("zh-en");
@@ -686,24 +694,61 @@ function App() {
         <button className="lang-toggle" onClick={() => setLang(l => l === "zh" ? "en" : "zh")}>{t.langToggle}</button>
         <button className="settings-btn" onClick={() => { setDraftSettings({ ...settings }); setShowSettings(true); }}>⚙</button>
         <h2>{t.title}</h2>
-        <p>{t.subtitle}</p>
-        <div className="dir-switch">
-          <button
-            className={transDir === "zh-en" ? "dir-btn active" : "dir-btn"}
-            onClick={() => setTransDir("zh-en")}>
-            {DIR_LABEL["zh-en"]}
-          </button>
-          <button
-            className={transDir === "en-zh" ? "dir-btn active" : "dir-btn"}
-            onClick={() => setTransDir("en-zh")}>
-            {DIR_LABEL["en-zh"]}
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: "12px" }}>
-          <button onClick={handleToggle}>{t.startBtn}</button>
-          {/* 暫時隱藏一鍵全頁翻譯按鈕，保留底層邏輯與空白捷徑功能
-          <button onClick={handleFullScreenTranslate} style={{ backgroundColor: "#2ecc71" }}>{t.fullScreenBtn}</button>
-          */}
+        <p>{lang === "zh" ? "雙模即時 AI 翻譯 · 支援螢幕截圖覆蓋與劃詞選取翻譯" : "Dual-mode Real-time AI Translation"}</p>
+
+        <div className="feature-guide-cards">
+          <div className="feature-card capture-card">
+            <div className="feature-icon">📷</div>
+            <div className="feature-info">
+              <div className="feature-title-row">
+                <span className="feature-title">{lang === "zh" ? "螢幕截圖翻譯" : "Screenshot Translation"}</span>
+                <kbd className="feature-kbd">{settings.shortcut}</kbd>
+              </div>
+              <p className="feature-desc">
+                {lang === "zh"
+                  ? "使用自訂快捷鍵或點擊右側按鈕框選畫面，OCR 辨識後即時對位覆蓋"
+                  : "Press shortcut or click button to capture & select an area on screen for overlay translation"}
+              </p>
+              <div className="card-actions-row">
+                <div className="dir-switch-compact">
+                  <button
+                    className={transDir === "zh-en" ? "dir-btn active" : "dir-btn"}
+                    onClick={() => setTransDir("zh-en")}>
+                    {DIR_LABEL["zh-en"]}
+                  </button>
+                  <button
+                    className={transDir === "en-zh" ? "dir-btn active" : "dir-btn"}
+                    onClick={() => setTransDir("en-zh")}>
+                    {DIR_LABEL["en-zh"]}
+                  </button>
+                </div>
+                <button className="card-start-btn" onClick={handleToggle}>
+                  {t.startBtn}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="feature-card highlighted">
+            <div className="feature-icon">📝</div>
+            <div className="feature-info">
+              <div className="feature-title-row">
+                <span className="feature-title">{lang === "zh" ? "劃詞選取翻譯（免 OCR）" : "Selection Translation (No OCR)"}</span>
+                <kbd className="feature-kbd">Ctrl + C + C</kbd>
+              </div>
+              <p className="feature-desc">
+                {lang === "zh" ? (
+                  <>
+                    滑鼠反白選取任意文字後，<strong>按著 Ctrl 不放並連按兩次 C</strong>（Ctrl + C + C），游標旁即刻浮現 AI 翻譯視窗
+                  </>
+                ) : (
+                  <>
+                    Highlight any text, <strong>hold Ctrl down and press C twice</strong> (Ctrl + C + C) to pop up the instant AI translation window
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
         </div>
 
         {showSettings && (
@@ -772,11 +817,25 @@ function App() {
                   )}
                 </div>
               </label>
+              <label>
+                劃詞即時選取翻譯 / Selection Translation (Ctrl + C + C)
+                <div style={{ marginTop: "6px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontSize: "0.9rem", color: "#ddd" }}>
+                    <input
+                      type="checkbox"
+                      checked={draftSettings.doubleCtrlC !== false}
+                      onChange={e => setDraftSettings(s => ({ ...s, doubleCtrlC: e.target.checked }))}
+                    />
+                    <span>啟用「按著 Ctrl 連按兩次 C」劃詞翻譯 (Ctrl + C + C)</span>
+                  </label>
+                </div>
+              </label>
               <div className="settings-actions">
                 <button className="btn-secondary" onClick={() => { setShowSettings(false); setIsRecording(false); }}>取消</button>
                 <button className="btn-primary" onClick={async () => {
                   try {
                     await invoke("update_shortcut", { shortcutStr: draftSettings.shortcut });
+                    await invoke("set_double_ctrl_c_enabled", { enabled: draftSettings.doubleCtrlC !== false }).catch(console.error);
                     saveSettings(draftSettings);
                     setSettings(draftSettings);
                     setShowSettings(false);
