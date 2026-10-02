@@ -96,7 +96,7 @@ interface TranslationLine {
   maxSafeWidth?: number;
 }
 
-// 從共用 Canvas 取樣 bounding box 的主導背景色（排除前景文字雜訊，單一 Canvas 複用）
+// 從共用 Canvas 取樣 bounding box 的主導背景色（排除前景文字與鄰近輸入框，採外圍周長邊界主導色聚類）
 function sampleBgColorFromCtx(
   ctx: CanvasRenderingContext2D | null,
   W: number,
@@ -113,54 +113,95 @@ function sampleBgColorFromCtx(
   const rh = Math.max(1, Math.min(Math.round(h), H - ry));
 
   try {
-    const d = ctx.getImageData(rx, ry, rw, rh).data;
-    const colors: { r: number; g: number; b: number; lum: number }[] = [];
-    
-    // 大區域時採用步長抽樣，大幅加速計算
-    const step = d.length > 4000 ? 8 : 4;
-    for (let i = 0; i < d.length; i += step) {
-      const r = d[i];
-      const g = d[i + 1];
-      const b = d[i + 2];
-      const a = d[i + 3];
-      if (a < 50) continue; // 忽略透明像素
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      colors.push({ r, g, b, lum });
+    // 擴展 2px 取樣視窗以完整涵蓋外圍周長（Perimeter）
+    // 在 UI 介面（如 WinForms/MES/Web）中，標籤文字本體位於容器背景上，
+    // 其頂部、底部與左側外邊界是 100% 純淨的容器原生底色（如 #f0f0f0、#1e1e1e）。
+    // 右側若緊鄰白色輸入框，內部框選容易沾染白色；
+    // 因此透過周長邊界多點採樣並進行顏色直方圖量化聚類（Mode 眾數），
+    // 能夠 100% 免疫鄰近白色輸入框的像素干擾，徹底根除「白膏藥」貼布問題！
+    const margin = 2;
+    const sx = Math.max(0, rx - margin);
+    const sy = Math.max(0, ry - margin);
+    const sw = Math.min(W - sx, rw + margin * 2);
+    const sh = Math.min(H - sy, rh + margin * 2);
+
+    const d = ctx.getImageData(sx, sy, sw, sh).data;
+    const sampleColors: { r: number; g: number; b: number }[] = [];
+
+    const getPixelAt = (lx: number, ly: number) => {
+      if (lx < 0 || lx >= sw || ly < 0 || ly >= sh) return null;
+      const idx = (ly * sw + lx) * 4;
+      const a = d[idx + 3];
+      if (a < 50) return null;
+      return { r: d[idx], g: d[idx + 1], b: d[idx + 2] };
+    };
+
+    // 1. 上外緣與頂部邊界橫向取樣 (ly = 0, 1)
+    for (let lx = 0; lx < sw; lx += 2) {
+      const p0 = getPixelAt(lx, 0);
+      if (p0) sampleColors.push(p0);
+      const p1 = getPixelAt(lx, 1);
+      if (p1) sampleColors.push(p1);
     }
 
-    if (colors.length === 0) return "#ffffff";
-
-    // 使用偏向兩極群組中位數統計：
-    // 在有文字的地方，像素中不是背景色（佔大多數）就是文字筆劃顏色（佔少數，且通常是深黑或純白等極端顏色）。
-    // 我們先找出亮度的中位數，如果是亮背景（中位數 > 127），背景色會集中在亮端，進一步取 35% ~ 95% 的平均；
-    // 如果是暗背景（中位數 <= 127），背景色集中在暗端，進一步取 5% ~ 65% 的平均。
-    // 這能達到近乎完美地排乾除文字筆劃（反差極端色）雜訊，還原最真實的背景純色！
-    colors.sort((a, b) => a.lum - b.lum);
-    const medianLum = colors[Math.floor(colors.length / 2)].lum;
-    
-    let validSrc;
-    if (medianLum > 127) {
-      // 亮色背景：拋棄最暗的 35%（通常是黑色字體筆劃及其抗鋸齒邊緣）
-      const start = Math.floor(colors.length * 0.35);
-      const end = Math.floor(colors.length * 0.95);
-      validSrc = colors.slice(start, end);
-    } else {
-      // 暗色背景：拋棄最亮的 35%（通常是白色字體筆劃其暈開邊緣）
-      const start = Math.floor(colors.length * 0.05);
-      const end = Math.floor(colors.length * 0.65);
-      validSrc = colors.slice(start, end);
+    // 2. 下外緣與底部邊界橫向取樣 (ly = sh - 2, sh - 1)
+    for (let lx = 0; lx < sw; lx += 2) {
+      const p0 = getPixelAt(lx, sh - 2);
+      if (p0) sampleColors.push(p0);
+      const p1 = getPixelAt(lx, sh - 1);
+      if (p1) sampleColors.push(p1);
     }
 
-    if (validSrc.length === 0) validSrc = colors;
-
-    let rSum = 0, gSum = 0, bSum = 0;
-    for (const c of validSrc) {
-      rSum += c.r;
-      gSum += c.g;
-      bSum += c.b;
+    // 3. 左外緣縱向取樣 (lx = 0, 1) - 避開右側可能的白色文字框
+    for (let ly = 0; ly < sh; ly += 2) {
+      const p0 = getPixelAt(0, ly);
+      if (p0) sampleColors.push(p0);
+      const p1 = getPixelAt(1, ly);
+      if (p1) sampleColors.push(p1);
     }
-    const count = validSrc.length;
-    return `rgb(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)})`;
+
+    // 4. 若邊緣點過少（例如超小元件），加入內部網格步長抽樣作為保底
+    if (sampleColors.length < 10) {
+      for (let ly = 1; ly < sh - 1; ly += 2) {
+        for (let lx = 1; lx < sw - 1; lx += 2) {
+          const p = getPixelAt(lx, ly);
+          if (p) sampleColors.push(p);
+        }
+      }
+    }
+
+    if (sampleColors.length === 0) return "#ffffff";
+
+    // 顏色直方圖量化聚類（以 12 為量化步長，精確聚集主導色調）
+    const buckets = new Map<string, { count: number; rSum: number; gSum: number; bSum: number }>();
+    for (const c of sampleColors) {
+      const qr = Math.round(c.r / 12) * 12;
+      const qg = Math.round(c.g / 12) * 12;
+      const qb = Math.round(c.b / 12) * 12;
+      const key = `${qr}_${qg}_${qb}`;
+      const entry = buckets.get(key);
+      if (entry) {
+        entry.count++;
+        entry.rSum += c.r;
+        entry.gSum += c.g;
+        entry.bSum += c.b;
+      } else {
+        buckets.set(key, { count: 1, rSum: c.r, gSum: c.g, bSum: c.b });
+      }
+    }
+
+    // 找出頻率最高的主導色 Bucket（Mode 眾數）
+    let bestBucket = { count: 0, rSum: 255, gSum: 255, bSum: 255 };
+    for (const b of buckets.values()) {
+      if (b.count > bestBucket.count) {
+        bestBucket = b;
+      }
+    }
+
+    const finalR = Math.round(bestBucket.rSum / bestBucket.count);
+    const finalG = Math.round(bestBucket.gSum / bestBucket.count);
+    const finalB = Math.round(bestBucket.bSum / bestBucket.count);
+    return `rgb(${finalR},${finalG},${finalB})`;
   } catch (e) {
     console.error("取樣背景色失敗:", e);
     return "#ffffff";

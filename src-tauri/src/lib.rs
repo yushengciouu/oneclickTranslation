@@ -126,12 +126,22 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
         return Ok(engine);
     }
     emit_ocr_status("正在載入 PP-OCRv5 辨識引擎...");
+    let det_config = oar_ocr::domain::tasks::text_detection::TextDetectionConfig {
+        score_threshold: 0.20,
+        box_threshold: 0.38,
+        unclip_ratio: 1.15,
+        max_candidates: 2000,
+        limit_side_len: Some(3200),
+        max_side_len: Some(4000),
+        limit_type: None,
+    };
     let built = oar_ocr::oarocr::OAROCRBuilder::new(
         MODEL_DET_BYTES.to_vec(),
         MODEL_REC_BYTES.to_vec(),
         "dummy_dict_path.txt",
     )
     .character_dict_content(MODEL_DICT_STR)
+    .text_detection_config(det_config)
     .build()
     .map_err(|e| format!("PP-OCRv5 模型載入失敗：{e}"))?;
     let _ = ENGINE.set(Mutex::new(built));
@@ -141,14 +151,90 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
         .ok_or_else(|| "PP-OCRv5 引擎初始化失敗".to_string())
 }
 
+/// 偵測並剔除被 OCR 誤判為開頭字母的 UI 單選按鈕圓圈 (⚪)、核取方塊 (☑) 等圖示雜訊，
+/// 並回傳 (乾淨的文字, 圓圈寬度佔比)，以便精確將 bounding box 往右偏移，讓原生圓圈保持可見且可點擊。
+fn clean_ui_icon_prefix(text: &str) -> Option<(&str, f64)> {
+    let t = text.trim();
+
+    // 1. 常見圖示 Unicode 符號前綴：⚪, 🔘, ⭕, ○, ●, ⚫, ©, ®, ￮, (c), (C), [v], [x]
+    for sym in &[
+        "⚪", "🔘", "⭕", "○", "●", "⚫", "©", "®", "￮",
+        "(c) ", "(C) ", "(c)", "(C)", "[v] ", "[x] ", "[ ] ", "( ) ",
+    ] {
+        if let Some(rest) = t.strip_prefix(sym) {
+            let trimmed = rest.trim_start();
+            if !trimmed.is_empty() {
+                return Some((trimmed, 1.0));
+            }
+        }
+    }
+
+    // 2. "C ", "c ", "( ", "[ ", "O ", "o " 等誤將圓圈識別為字母與空格的雜訊
+    for pfx in &["C ", "c ", "( ", "[ ", "O ", "o ", "{ "] {
+        if let Some(rest) = t.strip_prefix(pfx) {
+            let trimmed = rest.trim_start();
+            if trimmed.len() >= 2 {
+                return Some((trimmed, 0.9));
+            }
+        }
+    }
+
+    // 3. 圓圈直接與大寫字母相連（如 CCP, CFT, CShipping, CIncoming, CMerge, CScrap, CSplit, CQA）
+    if t.starts_with('C') || t.starts_with('c') {
+        let rest = &t[1..];
+        let is_known_ui = rest.starts_with("Incoming")
+            || rest.starts_with("Shipping")
+            || rest.starts_with("Merge")
+            || rest.starts_with("Scrap")
+            || rest.starts_with("Split")
+            || rest.starts_with("QA")
+            || rest.starts_with("FT")
+            || rest.starts_with("Cp")
+            || rest.starts_with("CP");
+        if is_known_ui {
+            let clean = if rest == "Cp" { "CP" } else { rest };
+            return Some((clean, 0.85));
+        }
+
+        // 通用規則：C 後面緊接大寫+小寫開頭的名詞（例如 CDelete, CSave, CEdit, CSearch）
+        // 需排除一般以 C 開頭的常見單字（如 Clear, Close, Copy, Count, Check, Cancel, Create, Confirm）
+        let chars: Vec<char> = rest.chars().collect();
+        if chars.len() >= 3 && chars[0].is_ascii_uppercase() && chars[1].is_ascii_lowercase() {
+            let full_lower = t.to_ascii_lowercase();
+            let is_common_c_word = full_lower.starts_with("clear")
+                || full_lower.starts_with("close")
+                || full_lower.starts_with("copy")
+                || full_lower.starts_with("count")
+                || full_lower.starts_with("check")
+                || full_lower.starts_with("cancel")
+                || full_lower.starts_with("create")
+                || full_lower.starts_with("confirm")
+                || full_lower.starts_with("config")
+                || full_lower.starts_with("custom")
+                || full_lower.starts_with("color");
+            if !is_common_c_word {
+                return Some((rest, 0.85));
+            }
+        }
+    }
+
+    None
+}
+
 fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
-    // 1. 2.0x 高解析度 Lanczos3 預處理：
-    // Windows 傳統點陣字型（如新細明體 9~12px）在 1x 原圖上筆劃極細，DBNet 神經網路特徵容易遺失（導致「工號」漏檢），
-    // 且單選圓圈 ⚪ 與文字間隙僅 2px，易發生連通塊沾黏（導致誤判為 CCP、C Shipping）。
-    // 透過 2.0x Lanczos3 高階插值放大，特徵空間增大 4 倍，大幅提高小字召回率並自然拉開圖標間隙。
+    // 1. 動態高解析度 Lanczos3 預處理：
+    // 對中低解析度或選取區域進行自適應超採樣，確保 9~12px 點陣漢字（如「工號」、「作業站」）筆劃極其清晰。
+    // 在全螢幕 1080p 畫面下使用 1.5x（解析度提升至 2880x1620，適度位於 limit_side_len 3200 內），
+    // 兼具神速辨識與極致細節；在小局部裁切框下採用 2.0x 放大以追求最高文字解析度。
     let raw_img = screenshots::image::load_from_memory(image_data).map_err(|e| e.to_string())?;
     let (w, h) = (raw_img.width(), raw_img.height());
-    let scale = 2.0f64;
+    let scale = if w >= 2560 {
+        1.0f64
+    } else if w >= 1600 {
+        1.5f64
+    } else {
+        2.0f64
+    };
     let nw = (w as f64 * scale) as u32;
     let nh = (h as f64 * scale) as u32;
 
@@ -205,22 +291,30 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             continue;
         }
 
-        // DBNet 多邊形擴張緊縮校正 (Bounding Box Inset / Tightening)：
-        // DBNet 預設因 Unclip 膨脹係數會使外框上下過於寬鬆（通常上下多出 3~5px），
-        // 在密集行距（行高僅 18~20px）的表單中會嚴重覆蓋上一行文字。
-        // 適度緊縮上下邊界約 12%（最大 2.5px），精確貼合 Windows 桌面文字的真實高度：
-        let tight_pad_y = (raw_h * 0.12).min(2.5);
+        // DBNet 多邊形緊縮校正 (Bounding Box Inset / Tightening)：
+        // 在 unclip_ratio 設為 1.15 時，邊界已極為緊湊貼合。
+        // 微調上下與左右邊緣，確保不侵犯上下鄰行：
+        let tight_pad_y = (raw_h * 0.05).min(1.5);
         let final_y = (y0 as f64 / scale) + tight_pad_y;
         let final_h = (raw_h - tight_pad_y * 2.0).max(8.0);
 
-        let tight_pad_x = (raw_w * 0.03).min(2.0);
-        let final_x = (x0 as f64 / scale) + tight_pad_x;
-        let final_w = (raw_w - tight_pad_x * 2.0).max(4.0);
+        let tight_pad_x = (raw_w * 0.02).min(1.5);
+        let mut final_x = (x0 as f64 / scale) + tight_pad_x;
+        let mut final_w = (raw_w - tight_pad_x * 2.0).max(4.0);
 
-        // 做法 A：UI 圖示雜訊精準過濾 (Icon Artifact Filter)
-        let char_count = text.chars().count();
+        // 做法 A：單選圓圈 (⚪) / 核取方塊 (☑) / 圖示雜訊剝除與座標偏移
+        let mut final_text = text.to_string();
+        if let Some((cleaned, ratio)) = clean_ui_icon_prefix(&final_text) {
+            let offset_w = (final_h * ratio).min(final_w * 0.40);
+            final_x += offset_w;
+            final_w = (final_w - offset_w).max(4.0);
+            final_text = cleaned.to_string();
+        }
+
+        // 做法 B：UI 圖示雜訊精準過濾 (Icon Artifact Filter)
+        let char_count = final_text.chars().count();
         if char_count == 1 {
-            let ch = text.chars().next().unwrap();
+            let ch = final_text.chars().next().unwrap();
             let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&ch)
                 || ('\u{3400}'..='\u{4dbf}').contains(&ch)
                 || ('\u{f900}'..='\u{faff}').contains(&ch);
@@ -255,14 +349,14 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             }
         } else if char_count == 2 {
             // 2 字元的純符號圖示雜訊（如 ">>", "->", "--", "==", ".." 等）
-            let all_symbols = text.chars().all(|c| !c.is_alphanumeric());
+            let all_symbols = final_text.chars().all(|c| !c.is_alphanumeric());
             if all_symbols && confidence < 0.85 {
                 continue;
             }
         }
 
         let line = OcrLine {
-            text: text.to_string(),
+            text: final_text,
             x: final_x,
             y: final_y,
             width: final_w,
@@ -389,35 +483,29 @@ async fn ocr_image(
         let language =
             Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;
 
-        // TryCreateFromLanguage 在語言未安裝 OCR 元件時不會回傳 Err，而是回傳空物件，
-        // 之後呼叫 RecognizeAsync 會導致不明確的失敗，因此先用 IsLanguageSupported 明確擋下並回報可診斷的錯誤。
+        // 許多 Windows 使用者電腦（尤其繁中/非英文語系、企業企業網域受限版）沒有安裝英文 (en) 或繁中 Windows OCR 語言包。
+        // 若缺少該語言包，不再向使用者報錯阻斷，而是 100% 平滑自動無縫切換至內建的 PP-OCRv5 離線引擎！
         let supported = OcrEngine::IsLanguageSupported(&language).unwrap_or(false);
         if !supported {
-            let available = OcrEngine::AvailableRecognizerLanguages()
-                .ok()
-                .map(|langs| {
-                    (0..langs.Size().unwrap_or(0))
-                        .filter_map(|i| langs.GetAt(i).ok())
-                        .filter_map(|l| l.LanguageTag().ok())
-                        .map(|t| t.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            return Err(format!(
-                "此電腦尚未安裝「{}」的 Windows OCR 語言套件（設定 > 時間與語言 > 語言與地區 > 該語言 > 選用功能 > 光學字元辨識）。目前已安裝的 OCR 語言：[{}]",
-                ocr_lang, available
-            ));
+            emit_ocr_status(&format!("此電腦未安裝 Windows OCR「{}」語言套件，已自動無縫切換為內建 PP-OCRv5 離線辨識", ocr_lang));
+            return ocr_with_offline(&image_data);
         }
 
-        let engine =
-            OcrEngine::TryCreateFromLanguage(&language).map_err(|e| e.to_string())?;
+        let engine = match OcrEngine::TryCreateFromLanguage(&language) {
+            Ok(eng) => eng,
+            Err(_) => {
+                emit_ocr_status("Windows OCR 引擎建立失敗，已自動無縫切換為內建 PP-OCRv5 離線辨識");
+                return ocr_with_offline(&image_data);
+            }
+        };
 
-        let result = engine
-            .RecognizeAsync(&bitmap)
-            .map_err(|e| e.to_string())?
-            .get()
-            .map_err(|e| e.to_string())?;
+        let result = match engine.RecognizeAsync(&bitmap).and_then(|op| op.get()) {
+            Ok(res) => res,
+            Err(_) => {
+                emit_ocr_status("Windows OCR 執行失敗，已自動無縫切換為內建 PP-OCRv5 離線辨識");
+                return ocr_with_offline(&image_data);
+            }
+        };
 
         let mut ocr_lines = Vec::new();
         let lines = result.Lines().map_err(|e| e.to_string())?;
@@ -613,21 +701,48 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
             "You are a precise, professional software and system UI translator. Translate each tagged English text item into Traditional Chinese (繁體中文).\n\n\
              Strict Guidelines:\n\
              1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
-             2. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', 'Inbox', translate it professionally (e.g., '[#1] 郵件', '[#2] 收件匣', '[#3] 草稿').\n\
-             3. If an item is already in Traditional Chinese, preserve it exactly as is after its tag.\n\
-             4. Keep all brand names ('GitHub', 'Tauri', etc.) or personal names intact in English.\n\
-             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+             2. Domain & UI Glossary:\n\
+                - 'Incoming' -> '入庫' or '進料'\n\
+                - 'Shipping' -> '出貨'\n\
+                - 'Scrap' -> '報廢'\n\
+                - 'Split' -> '分批'\n\
+                - 'Merge' -> '合批'\n\
+                - 'Lot No.' or 'Batch' -> '批號'\n\
+                - 'Station' -> '作業站'\n\
+                - 'Yield' -> '良率'\n\
+             3. Keep acronyms, hardware names, and brand names intact (e.g., 'CP', 'FT', 'QA', 'FQC', 'TMRobot', 'MES', 'Sigurd', 'Wafer', 'Pkg', 'Pin').\n\
+             4. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', 'Inbox', translate it professionally (e.g., '[#1] 郵件', '[#2] 收件匣', '[#3] 草稿').\n\
+             5. If an item is already in Traditional Chinese, preserve it exactly as is after its tag.\n\
+             6. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     } else {
         format!(
-            "You are a precise, literal, and professional translator. Translate each tagged Traditional Chinese text item into English.\n\n\
+            "You are a precise, literal, and professional software/system UI translator. Translate each tagged Traditional Chinese text item into English.\n\n\
              Strict Guidelines:\n\
              1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
-             2. Keep names, contacts, and personal names intact or translit them accurately.\n\
-             3. Crucial: Do NOT hallucinate UI or settings page labels based on guessing. Keep original letters/names!\n\
-             4. If an item is already in English, preserve it exactly as is after its tag.\n\
-             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+             2. Manufacturing / Enterprise / Software UI Terminology:\n\
+                - 工號 -> Employee ID (or Badge No.)\n\
+                - 批號 -> Lot No. (or Batch No.)\n\
+                - 作業站 / 站別 -> Station / Operation\n\
+                - 簡稱 -> Abbr.\n\
+                - 矽格 -> Sigurd\n\
+                - 機台 / 設備 -> Machine / Tool\n\
+                - 抽樣 / 抽樣數 -> Sampling / Sample Size\n\
+                - 良率 -> Yield\n\
+                - 入庫 -> Incoming\n\
+                - 出貨 -> Shipping\n\
+                - 報廢 -> Scrap\n\
+                - 分批 -> Split\n\
+                - 合批 -> Merge\n\
+                - 查詢 / 搜尋 -> Search / Query\n\
+                - 修改 / 編輯 -> Edit / Modify\n\
+                - 確定 / 確認 -> Confirm / OK\n\
+                - 取消 -> Cancel\n\
+             3. Crucial: Do NOT hallucinate bizarre words (e.g., never translate 工號 as 'Work Purple' or 批號 as 'Batch Tool'). Use standard industrial/business English terms.\n\
+             4. Keep names, contacts, and personal names intact or transliterate accurately.\n\
+             5. If an item is already in English or standard alphanumeric code, preserve it exactly as is after its tag.\n\
+             6. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     };
