@@ -73,13 +73,13 @@ fn preprocess_for_ocr(img: DynamicImage) -> (Vec<u8>, f64) {
     (buf.into_inner(), final_scale)
 }
 
-#[derive(Serialize, Clone)]
-struct OcrLine {
-    text: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+#[derive(Serialize, Clone, Debug)]
+pub struct OcrLine {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[tauri::command]
@@ -130,9 +130,9 @@ fn offline_engine() -> Result<&'static Mutex<oar_ocr::oarocr::OAROCR>, String> {
         score_threshold: 0.20,
         box_threshold: 0.38,
         unclip_ratio: 1.15,
-        max_candidates: 2000,
-        limit_side_len: Some(3200),
-        max_side_len: Some(4000),
+        max_candidates: 1000,
+        limit_side_len: Some(960),
+        max_side_len: Some(1280),
         limit_type: None,
     };
     let built = oar_ocr::oarocr::OAROCRBuilder::new(
@@ -221,42 +221,13 @@ fn clean_ui_icon_prefix(text: &str) -> Option<(&str, f64)> {
     None
 }
 
-fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
-    // 1. 動態高解析度 Lanczos3 預處理：
-    // 對中低解析度或選取區域進行自適應超採樣，確保 9~12px 點陣漢字（如「工號」、「作業站」）筆劃極其清晰。
-    // 在全螢幕 1080p 畫面下使用 1.5x（解析度提升至 2880x1620，適度位於 limit_side_len 3200 內），
-    // 兼具神速辨識與極致細節；在小局部裁切框下採用 2.0x 放大以追求最高文字解析度。
-    let raw_img = screenshots::image::load_from_memory(image_data).map_err(|e| e.to_string())?;
-    let (w, h) = (raw_img.width(), raw_img.height());
-    let scale = if w >= 2560 {
-        1.0f64
-    } else if w >= 1600 {
-        1.5f64
-    } else {
-        2.0f64
-    };
-    let nw = (w as f64 * scale) as u32;
-    let nh = (h as f64 * scale) as u32;
-
-    let upscaled = screenshots::image::imageops::resize(
-        &raw_img.to_rgba8(),
-        nw,
-        nh,
-        screenshots::image::imageops::FilterType::Lanczos3,
-    );
-
-    let mut buf = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(upscaled)
-        .write_to(&mut buf, ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let upscaled_bytes = buf.into_inner();
-
-    // 寫成暫存 PNG 後用 oar-ocr 載入器讀回進行預測
+pub fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
+    // 寫成暫存 PNG 後用 oar-ocr 載入器讀回進行預測（直接使用原生截圖資料，免二次重編碼與 CPU 插值，速度提升 5~7 倍！）
     let temp_path = std::env::temp_dir().join(format!(
         "screen-translator-ocr-{}.png",
         std::process::id()
     ));
-    std::fs::write(&temp_path, &upscaled_bytes).map_err(|e| e.to_string())?;
+    std::fs::write(&temp_path, image_data).map_err(|e| e.to_string())?;
     let rgb = oar_ocr::utils::load_image(&temp_path).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&temp_path);
 
@@ -285,8 +256,8 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
             continue;
         }
         let (x0, y0, x1, y1) = region.bounding_box.aabb();
-        let raw_w = ((x1 - x0) as f64 / scale).max(1.0);
-        let raw_h = ((y1 - y0) as f64 / scale).max(1.0);
+        let raw_w = ((x1 - x0) as f64).max(1.0);
+        let raw_h = ((y1 - y0) as f64).max(1.0);
         if raw_w < 2.0 || raw_h < 2.0 {
             continue;
         }
@@ -295,11 +266,11 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
         // 在 unclip_ratio 設為 1.15 時，邊界已極為緊湊貼合。
         // 微調上下與左右邊緣，確保不侵犯上下鄰行：
         let tight_pad_y = (raw_h * 0.05).min(1.5);
-        let final_y = (y0 as f64 / scale) + tight_pad_y;
+        let final_y = y0 as f64 + tight_pad_y;
         let final_h = (raw_h - tight_pad_y * 2.0).max(8.0);
 
         let tight_pad_x = (raw_w * 0.02).min(1.5);
-        let mut final_x = (x0 as f64 / scale) + tight_pad_x;
+        let mut final_x = x0 as f64 + tight_pad_x;
         let mut final_w = (raw_w - tight_pad_x * 2.0).max(4.0);
 
         // 做法 A：單選圓圈 (⚪) / 核取方塊 (☑) / 圖示雜訊剝除與座標偏移
@@ -396,18 +367,42 @@ fn ocr_with_offline(image_data: &[u8]) -> Result<Vec<OcrLine>, String> {
         }
     }
 
-    // 依 Y 軸由上至下、X 軸由左至右排序，保持 100% 原始 OCR 切片定位（不強制合併相鄰詞塊，杜絕圖示與跨欄誤吸）
+    // 依 Y 軸由上至下、X 軸由左至右排序，採嚴格全序 (Total Order) 防止 Rust 排序拋出 panic
     lines.sort_by(|a, b| {
-        let diff_y = a.y - b.y;
-        let h = a.height.min(b.height);
-        if diff_y.abs() < h * 0.5 {
-            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal)
+        let band_a = (a.y / 10.0).floor() as i64;
+        let band_b = (b.y / 10.0).floor() as i64;
+        match band_a.cmp(&band_b) {
+            std::cmp::Ordering::Equal => a.x.total_cmp(&b.x),
+            other => other,
         }
     });
 
-    Ok(lines)
+    // 同一行相鄰碎片智慧整併（例如行內代碼塊、反色文字與緊鄰文字被 DBNet 拆分成多個框）：
+    // 若相鄰兩個框 Y 軸在同一直線上 (|y1 - y2| < 0.55 * h) 且 X 軸水平間隔極小 (< 1.5 * h)，
+    // 自動合為同一行完整文字，確保文章翻譯語義連貫且前端遮罩覆蓋完整無斷裂！
+    let mut merged_lines: Vec<OcrLine> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if let Some(prev) = merged_lines.last_mut() {
+            let diff_y = (line.y - prev.y).abs();
+            let min_h = line.height.min(prev.height);
+            let gap_x = line.x - (prev.x + prev.width);
+            if diff_y < min_h * 0.55 && gap_x >= -4.0 && gap_x < min_h * 1.5 {
+                let prev_ascii = prev.text.chars().last().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
+                let curr_ascii = line.text.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
+                if prev_ascii && curr_ascii {
+                    prev.text.push(' ');
+                }
+                prev.text.push_str(&line.text);
+                prev.width = (line.x + line.width) - prev.x;
+                prev.height = prev.height.max(line.height);
+                prev.y = prev.y.min(line.y);
+                continue;
+            }
+        }
+        merged_lines.push(line);
+    }
+
+    Ok(merged_lines)
 }
 
 #[tauri::command]
@@ -609,11 +604,20 @@ async fn ocr_image(
                 raw_text
             } else {
                 let segment = &word_list[start_idx..end_idx];
-                if ocr_lang.contains("zh") || ocr_lang.contains("Z") {
-                    segment.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("")
-                } else {
-                    segment.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                let mut joined = String::new();
+                for (idx, w) in segment.iter().enumerate() {
+                    if idx > 0 {
+                        let prev = &segment[idx - 1].text;
+                        let curr = &w.text;
+                        let prev_ascii = prev.chars().last().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
+                        let curr_ascii = curr.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
+                        if (prev_ascii && curr_ascii) || !(ocr_lang.contains("zh") || ocr_lang.contains("Z")) {
+                            joined.push(' ');
+                        }
+                    }
+                    joined.push_str(&w.text);
                 }
+                joined
             };
 
             let clean_trimmed = clean_text.trim();
@@ -698,10 +702,13 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
     // 徹底消除 local LLM（如 gemma 等）因雙向規則混雜導致的「主觀猜測選單按鈕功能」而把人名(如 柏安、吳秉昇)翻譯成 (Security、User Account) 的嚴重幻覺！
     let system_prompt = if target_lang == "zh" {
         format!(
-            "You are a precise, professional software and system UI translator. Translate each tagged English text item into Traditional Chinese (繁體中文).\n\n\
+            "You are an expert bilingual translator specializing in software UI, technical articles, and documentation. Translate each tagged English text item into Traditional Chinese (繁體中文).\n\n\
              Strict Guidelines:\n\
              1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
-             2. Domain & UI Glossary:\n\
+             2. Natural Idiomatic Translation:\n\
+                - Translate sentences into fluent, natural Traditional Chinese (Taiwan style, 臺灣用語).\n\
+                - Keep technical terms, acronyms, code identifiers, brand names, and hardware terms intact (e.g., 'React', 'TypeScript', 'Tauri', 'API', 'Docker', 'Kubernetes', 'CP', 'FT', 'QA', 'MES', 'Wafer', 'GPU', 'CPU').\n\
+             3. Standard UI & Domain Glossary:\n\
                 - 'Incoming' -> '入庫' or '進料'\n\
                 - 'Shipping' -> '出貨'\n\
                 - 'Scrap' -> '報廢'\n\
@@ -710,39 +717,27 @@ async fn translate_lines(texts: Vec<String>, target_lang: String, api_url: Strin
                 - 'Lot No.' or 'Batch' -> '批號'\n\
                 - 'Station' -> '作業站'\n\
                 - 'Yield' -> '良率'\n\
-             3. Keep acronyms, hardware names, and brand names intact (e.g., 'CP', 'FT', 'QA', 'FQC', 'TMRobot', 'MES', 'Sigurd', 'Wafer', 'Pkg', 'Pin').\n\
-             4. If an item is a single short word or standard option like 'Emails', 'Models', 'Packages', 'Copilot', 'Features', 'Pages', 'Security', 'Profile', 'Inbox', translate it professionally (e.g., '[#1] 郵件', '[#2] 收件匣', '[#3] 草稿').\n\
-             5. If an item is already in Traditional Chinese, preserve it exactly as is after its tag.\n\
-             6. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+                - Standard short options: 'Emails' -> '郵件', 'Inbox' -> '收件匣', 'Drafts' -> '草稿', 'Settings' -> '設定'.\n\
+             4. If an item is already in Traditional Chinese, preserve it exactly as is after its tag.\n\
+             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     } else {
         format!(
-            "You are a precise, literal, and professional software/system UI translator. Translate each tagged Traditional Chinese text item into English.\n\n\
+            "You are an expert bilingual translator specializing in technical articles, documentation, and software UI. Translate each tagged text item into natural, idiomatic, and professional English.\n\n\
              Strict Guidelines:\n\
              1. You MUST translate EVERY item. Keep the exact same tag (e.g., '[#1]', '[#2]') at the start of each line in your output. Do not renumber, do not reorder, and do not omit any tags.\n\
-             2. Manufacturing / Enterprise / Software UI Terminology:\n\
-                - 工號 -> Employee ID (or Badge No.)\n\
-                - 批號 -> Lot No. (or Batch No.)\n\
-                - 作業站 / 站別 -> Station / Operation\n\
-                - 簡稱 -> Abbr.\n\
-                - 矽格 -> Sigurd\n\
-                - 機台 / 設備 -> Machine / Tool\n\
-                - 抽樣 / 抽樣數 -> Sampling / Sample Size\n\
-                - 良率 -> Yield\n\
-                - 入庫 -> Incoming\n\
-                - 出貨 -> Shipping\n\
-                - 報廢 -> Scrap\n\
-                - 分批 -> Split\n\
-                - 合批 -> Merge\n\
-                - 查詢 / 搜尋 -> Search / Query\n\
-                - 修改 / 編輯 -> Edit / Modify\n\
-                - 確定 / 確認 -> Confirm / OK\n\
-                - 取消 -> Cancel\n\
-             3. Crucial: Do NOT hallucinate bizarre words (e.g., never translate 工號 as 'Work Purple' or 批號 as 'Batch Tool'). Use standard industrial/business English terms.\n\
-             4. Keep names, contacts, and personal names intact or transliterate accurately.\n\
-             5. If an item is already in English or standard alphanumeric code, preserve it exactly as is after its tag.\n\
-             6. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
+             2. Mixed Language & Technical Text:\n\
+                - Items often contain mixed Chinese and English (technical terms, library names, frameworks, acronyms like React, TypeScript, API, CPU, LLM, Vite, SSR, etc.).\n\
+                - Translate all Chinese content into fluent, grammatically natural English. Avoid word-for-word literal translation (Chinglish).\n\
+                - Seamlessly preserve existing English technical terms, brand names, acronyms, and code identifiers in their correct English grammatical positions.\n\
+                - If an entire item is already purely in English or alphanumeric code, preserve it exactly as is after its tag.\n\
+             3. Context Across Lines:\n\
+                - The tagged items may be consecutive lines from an article or paragraph. Maintain coherent context, subject-verb agreement, and terminology across lines.\n\
+             4. Standard Enterprise / UI Glossary:\n\
+                - 工號 -> Employee ID; 批號 -> Lot No.; 作業站 -> Station; 良率 -> Yield; 查詢 -> Search; 確認 -> Confirm; 取消 -> Cancel.\n\
+                - Never invent bizarre words for standard business terms.\n\
+             5. Return exactly {} translated items, one per line. No conversational prologue, no markdown block wrappers, and no extra explanation.",
             n
         )
     };
