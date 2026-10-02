@@ -93,6 +93,7 @@ interface TranslationLine {
   height: number;
   bgColor: string;
   textColor: string;
+  maxSafeWidth?: number;
 }
 
 // 從共用 Canvas 取樣 bounding box 的主導背景色（排除前景文字雜訊，單一 Canvas 複用）
@@ -166,26 +167,49 @@ function sampleBgColorFromCtx(
   }
 }
 
-// 根據文字長度、寬度、高度，以及目前翻譯目標語言 (中文或英文)，動態計算最適合、最清晰舒適的字型大小
-function getAutoFontSize(_text: string, _width: number, height: number, targetLang: string): string {
+// 根據文字長度、高度、可用最大寬度，動態計算最適合且不暴衝的字型大小與是否折行
+function getAutoFontSize(
+  text: string,
+  height: number,
+  maxSafeWidth: number | undefined,
+  targetLang: string
+): { fontSize: string; isMultiLine: boolean } {
   const isZh = targetLang === "zh";
+  const isMultiLine = height >= 28;
 
-  if (isZh) {
-    // 英文翻中文 (en-zh)：
-    // 一般段落文字 height 約 14~20px，基準字體設為 height * 0.62；
-    // 按鈕或輸入框高度常有 30~38px，上限限制為 14.5px 避免短詞字體暴衝。
-    const baseSize = height < 40
-      ? Math.max(10.0, Math.min(height * 0.62, 14.5))
-      : Math.max(10.5, Math.min(height * 0.68, 28.0));
-    return `${baseSize.toFixed(1)}px`;
+  let baseSize: number;
+  if (isMultiLine) {
+    // 多行方塊（如表格雙行表頭、雙行按鈕）：每行實際行高約為 height / 2
+    // 嚴格限制在 10.5px ~ 13.0px，絕不暴衝到 28px
+    const effectiveLineHeight = height / 2;
+    baseSize = isZh
+      ? Math.max(10.5, Math.min(effectiveLineHeight * 0.62, 13.0))
+      : Math.max(11.0, Math.min(effectiveLineHeight * 0.68, 13.5));
   } else {
-    // 中文翻英文 (zh-en)：
-    // 英文小寫字母 x-height 較小，同樣 px 視覺上比漢字小，因此基準設為 height * 0.68
-    const baseSize = height < 40
-      ? Math.max(11.0, Math.min(height * 0.68, 15.5))
-      : Math.max(11.5, Math.min(height * 0.72, 28.0));
-    return `${baseSize.toFixed(1)}px`;
+    // 單行文字：字級限制在 10.0px ~ 13.5px
+    baseSize = isZh
+      ? Math.max(10.0, Math.min(height * 0.62, 13.5))
+      : Math.max(10.5, Math.min(height * 0.68, 14.0));
   }
+
+  // 若受到右鄰元件約束（如狹窄表格欄位），且為單行文字時，微幅收縮字級以盡可能完整塞入
+  if (maxSafeWidth && !isMultiLine && text) {
+    let zhChars = 0;
+    let enChars = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) > 127) zhChars++;
+      else enChars++;
+    }
+    const unitWidth = isZh ? 1.0 : 0.54;
+    const estUnits = zhChars + enChars * unitWidth;
+    const estWidth = estUnits * baseSize;
+    if (estWidth > maxSafeWidth - 4) {
+      const fitSize = (maxSafeWidth - 4) / Math.max(1, estUnits);
+      baseSize = Math.max(9.5, Math.min(baseSize, fitSize));
+    }
+  }
+
+  return { fontSize: `${baseSize.toFixed(1)}px`, isMultiLine };
 }
 
 // 根據背景亮度選擇深灰或柔白文字（避免刺眼純黑純白）
@@ -478,7 +502,38 @@ function App() {
       sampleCanvas.width = 0;
       sampleCanvas.height = 0;
 
-      setTranslations(resultBeforeFilter);
+      // 智慧水平碰撞偵測：在多欄表格、表單與緊湊工具列中，計算到右側相鄰元件的距離，防止文字向右穿透覆蓋鄰欄
+      const finalTranslations = resultBeforeFilter.map((t, idx) => {
+        let minDistanceToRight = Infinity;
+        for (let j = 0; j < resultBeforeFilter.length; j++) {
+          if (idx === j) continue;
+          const other = resultBeforeFilter[j];
+          // 檢查是否處於同一水平行（垂直重疊比例 > 35%）
+          const yOverlap = Math.max(0, Math.min(t.y + t.height, other.y + other.height) - Math.max(t.y, other.y));
+          const isSameRow = yOverlap > Math.min(t.height, other.height) * 0.35;
+          
+          // other 在 t 的右側（且不是同一位置）
+          if (isSameRow && other.x > t.x + 3) {
+            const dist = other.x - t.x;
+            if (dist < minDistanceToRight) {
+              minDistanceToRight = dist;
+            }
+          }
+        }
+
+        // 若右側有相鄰元件，限制最大安全寬度為相鄰距離 - 3px 間隙；
+        // 若右側無相鄰元件（如側邊欄、表格最右欄、對話框），則不限制（可延伸至螢幕邊界）
+        const maxSafeWidth = minDistanceToRight < Infinity
+          ? Math.max(t.width, minDistanceToRight - 3)
+          : undefined;
+
+        return {
+          ...t,
+          maxSafeWidth,
+        };
+      });
+
+      setTranslations(finalTranslations);
       setCopied(false);
       setMode("result");
     } catch (err) {
@@ -711,10 +766,20 @@ function App() {
         <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
           {translations.map((t, i) => {
             const targetLang = transDir === "zh-en" ? "en" : "zh";
-            const dynamicFontSize = getAutoFontSize(t.translated, t.width, t.height, targetLang);
-            // 加上左右 2.5px、上下 1.5px 膨脹補貼，並加上與背景同色的 1px 擴散光暈，100% 徹底蓋住抗鋸齒毛邊
+            const { fontSize: dynamicFontSize, isMultiLine } = getAutoFontSize(
+              t.translated,
+              t.height,
+              t.maxSafeWidth,
+              targetLang
+            );
             const padX = 2.5;
             const padY = 1.5;
+
+            // 最大寬度保護：若有相鄰右側元素，不可超過 maxSafeWidth；否則限制在螢幕邊界內
+            const calculatedMaxWidth = t.maxSafeWidth
+              ? `${Math.max(t.width + padX * 2, t.maxSafeWidth)}px`
+              : `calc(100vw - ${Math.round(t.x - padX)}px - 10px)`;
+
             return (
               <div
                 key={i}
@@ -729,15 +794,16 @@ function App() {
                   top: t.y - padY,
                   minWidth: t.width + padX * 2,
                   width: "max-content",
-                  maxWidth: `calc(100vw - ${Math.round(t.x - padX)}px - 10px)`,
+                  maxWidth: calculatedMaxWidth,
                   height: t.height + padY * 2,
                   fontSize: dynamicFontSize,
                   background: t.bgColor,
                   color: t.textColor,
                   boxShadow: `0 0 1px 1px ${t.bgColor}`,
                   lineHeight: 1.15,
-                  whiteSpace: "nowrap",
-                  wordBreak: "keep-all",
+                  whiteSpace: isMultiLine ? "normal" : "nowrap",
+                  wordBreak: isMultiLine ? "break-word" : "keep-all",
+                  textOverflow: isMultiLine ? "clip" : "ellipsis",
                   overflow: "hidden",
                   letterSpacing: targetLang === "zh" ? "0.01em" : "-0.01em",
                   fontWeight: 500,
