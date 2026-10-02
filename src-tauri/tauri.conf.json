@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "screen-translator",
+  "productName": "SAIGENT快捷翻譯",
   "version": "0.1.0",
   "identifier": "com.felixchiu.screen-translator",
   "build": {
@@ -12,13 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "screen-translator",
+        "title": "SAIGENT快捷翻譯",
         "width": 800,
         "height": 600
       },
       {
         "label": "quick",
-        "title": "Quick Translate",
+        "title": "SAIGENT快捷翻譯 - 劃詞翻譯",
         "url": "index.html?mode=quick",
         "width": 460,
         "height": 340,

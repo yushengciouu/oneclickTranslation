@@ -1,6 +1,6 @@
-# Screen Translator
+# SAIGENT快捷翻譯 (SAIGENT Translator)
 
-一款基於 Tauri + React + TypeScript 開發的桌面螢幕翻譯工具。
+一款基於 Tauri + React + TypeScript 開發的桌面螢幕與劃詞翻譯工具。
 
 ## 專案目標
 

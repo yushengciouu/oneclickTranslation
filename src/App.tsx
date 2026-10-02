@@ -54,7 +54,7 @@ const DIR_LABEL: Record<TransDir, string> = { "zh-en": "中→英", "en-zh": "�
 
 const LOCALE = {
   zh: {
-    title: "Screen Translator",
+    title: "SAIGENT快捷翻譯",
     subtitle: "按 Ctrl+Shift+T 或點按鈕開始截圖翻譯",
     startBtn: "開始截圖",
     fullScreenBtn: "一鍵全頁翻譯",
@@ -69,7 +69,7 @@ const LOCALE = {
     langToggle: "EN",
   },
   en: {
-    title: "Screen Translator",
+    title: "SAIGENT Translator",
     subtitle: "Press Ctrl+Shift+T or click the button to start",
     startBtn: "Start Capture",
     fullScreenBtn: "Full Page Translate",
