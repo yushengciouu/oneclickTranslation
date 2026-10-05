@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS = {
   apiUrl: "http://192.168.39.143:8001",
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
-  ocrEngine: "offline",
+  ocrEngine: "windows",
   maxSelectionChars: 800,
 };
 

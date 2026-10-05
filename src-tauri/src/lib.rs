@@ -431,7 +431,7 @@ async fn ocr_image(
         .decode(&data_str)
         .map_err(|e| e.to_string())?;
 
-    let engine = ocr_engine.unwrap_or_else(|| "offline".to_string());
+    let engine = ocr_engine.unwrap_or_else(|| "windows".to_string());
     if engine == "offline" {
         return tokio::task::spawn_blocking(move || ocr_with_offline(&image_data))
             .await

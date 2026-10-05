@@ -14,7 +14,7 @@ const DEFAULT_SETTINGS = {
   apiUrl: "http://192.168.39.143:8001",
   model: "gemma-4:31B",
   shortcut: "Ctrl+Shift+T",
-  ocrEngine: "offline" as OcrEngine,
+  ocrEngine: "windows" as OcrEngine,
   doubleCtrlC: true,
   maxSelectionChars: 800,
 };
@@ -33,11 +33,11 @@ function loadSettings(): AppSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      // 若為舊版設定升級，自動將預設 OCR 引擎切換為 PP-OCRv5
+      // 若為舊版設定升級，自動將預設 OCR 引擎更新為 Windows OCR
       const hasEngineVersion = localStorage.getItem("screen-translator-engine-version");
-      if (!hasEngineVersion) {
-        localStorage.setItem("screen-translator-engine-version", "v5");
-        parsed.ocrEngine = "offline";
+      if (hasEngineVersion !== "win-v1") {
+        localStorage.setItem("screen-translator-engine-version", "win-v1");
+        parsed.ocrEngine = "windows";
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(parsed));
       }
       return { ...DEFAULT_SETTINGS, ...parsed };
@@ -278,7 +278,7 @@ function cropImage(src: string, rect: Rect, padding = 32): Promise<{ dataUrl: st
       canvas.height = targetH;
       const ctx = canvas.getContext("2d");
       if (!ctx) { reject(new Error("No canvas context")); return; }
-      
+
       // 1. 先用圖片裁剪中心外圍最左上角像素填充畫布背景，防止黑/白背景色突兀
       try {
         const tempCanvas = document.createElement("canvas");
@@ -303,7 +303,7 @@ function cropImage(src: string, rect: Rect, padding = 32): Promise<{ dataUrl: st
         rect.x, rect.y, rect.width, rect.height, // 來源 crop
         padding, padding, rect.width, rect.height // 目的（帶有 32px 襯墊的中央區域）
       );
-      
+
       resolve({
         dataUrl: canvas.toDataURL("image/png"),
         padX: padding,
@@ -384,8 +384,8 @@ function App() {
   const rawT = LOCALE[lang];
   const t = {
     ...rawT,
-    subtitle: lang === "zh" 
-      ? `按 ${settings.shortcut} 或點按鈕開始截圖翻譯` 
+    subtitle: lang === "zh"
+      ? `按 ${settings.shortcut} 或點按鈕開始截圖翻譯`
       : `Press ${settings.shortcut} or click the button to capture`,
   };
 
@@ -463,7 +463,7 @@ function App() {
       const targetLang = transDir === "zh-en" ? "en" : "zh";
       const ocrEngine = settings.ocrEngine === "offline" ? "offline" : "windows";
       const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang, ocrEngine });
-      
+
       console.log(`[OCR] 偵測語言為 ${ocrLang}，共擷取到 ${ocrLines.length} 行文字:`);
       console.table(ocrLines.map((l, idx) => ({ 索引: idx, 文字: l.text, X: Math.round(l.x), Y: Math.round(l.y), 寬: Math.round(l.width), 高: Math.round(l.height) })));
 
@@ -562,7 +562,7 @@ function App() {
           // 檢查是否處於同一水平行（垂直重疊比例 > 35%）
           const yOverlap = Math.max(0, Math.min(t.y + t.height, other.y + other.height) - Math.max(t.y, other.y));
           const isSameRow = yOverlap > Math.min(t.height, other.height) * 0.35;
-          
+
           // other 在 t 的右側（且不是同一位置）
           if (isSameRow && other.x > t.x + 3) {
             const dist = other.x - t.x;
@@ -735,7 +735,7 @@ function App() {
             <div className="feature-icon">📝</div>
             <div className="feature-info">
               <div className="feature-title-row">
-                <span className="feature-title">{lang === "zh" ? "劃詞選取翻譯（免 OCR）" : "Selection Translation (No OCR)"}</span>
+                <span className="feature-title">{lang === "zh" ? "劃詞選取翻譯" : "Selection Translation"}</span>
                 <kbd className="feature-kbd">Ctrl + C + C</kbd>
               </div>
               <p className="feature-desc">
@@ -764,19 +764,19 @@ function App() {
                     <input
                       type="radio"
                       name="ocrEngine"
-                      checked={draftSettings.ocrEngine === "offline"}
-                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
+                      checked={draftSettings.ocrEngine === "windows"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
                     />
-                    <span>PP-OCRv5</span>
+                    <span>Windows OCR（預設推薦）</span>
                   </label>
                   <label className="ocr-engine-option">
                     <input
                       type="radio"
                       name="ocrEngine"
-                      checked={draftSettings.ocrEngine === "windows"}
-                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "windows" }))}
+                      checked={draftSettings.ocrEngine === "offline"}
+                      onChange={() => setDraftSettings(s => ({ ...s, ocrEngine: "offline" }))}
                     />
-                    <span>Windows OCR</span>
+                    <span>PP-OCRv5</span>
                   </label>
                 </div>
               </label>
