@@ -458,8 +458,8 @@ function App() {
       const padAmount = 32;
       const { dataUrl: cropped, padX, padY } = await cropImage(activeScreenshot, captureRect, padAmount);
 
-      // Step 1：Windows OCR 取得每行文字與精確座標
-      const ocrLang = transDir === "zh-en" ? "zh-Hant" : "en";
+      // Step 1：Windows OCR 取得每行文字與精確座標（zh-Hant 原生支援繁中、英文字母與數字混排，100% 相容繁中 Windows 且免裝英文套件）
+      const ocrLang = "zh-Hant";
       const targetLang = transDir === "zh-en" ? "en" : "zh";
       const ocrEngine = settings.ocrEngine === "offline" ? "offline" : "windows";
       const ocrLines = await invoke<OcrLine[]>("ocr_image", { imageBase64: cropped, ocrLang, ocrEngine });

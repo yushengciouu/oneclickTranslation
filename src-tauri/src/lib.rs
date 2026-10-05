@@ -487,15 +487,23 @@ async fn ocr_image(
             .get()
             .map_err(|e| e.to_string())?;
 
-        let language =
+        let mut language =
             Language::CreateLanguage(&HSTRING::from(ocr_lang.as_str())).map_err(|e| e.to_string())?;
 
-        // 許多 Windows 使用者電腦（尤其繁中/非英文語系、企業企業網域受限版）沒有安裝英文 (en) 或繁中 Windows OCR 語言包。
-        // 若缺少該語言包，不再向使用者報錯阻斷，而是 100% 平滑自動無縫切換至內建的 PP-OCRv5 離線引擎！
+        // 許多 Windows 使用者電腦（尤其繁中系統）沒有安裝英文 (en) Windows OCR 語言包。
+        // 若缺少該語言包，優先切換至 zh-Hant（原生支援英數字母與中文），若仍無則平滑切換至 PP-OCRv5。
         let supported = OcrEngine::IsLanguageSupported(&language).unwrap_or(false);
         if !supported {
-            emit_ocr_status(&format!("此電腦未安裝 Windows OCR「{}」語言套件，已自動無縫切換為內建 PP-OCRv5 離線辨識", ocr_lang));
-            return ocr_with_offline(&image_data);
+            if let Ok(fallback_lang) = Language::CreateLanguage(&HSTRING::from("zh-Hant")) {
+                if OcrEngine::IsLanguageSupported(&fallback_lang).unwrap_or(false) {
+                    language = fallback_lang;
+                } else {
+                    emit_ocr_status(&format!("此電腦未安裝 Windows OCR「{}」語言套件，已自動切換為內建 PP-OCRv5 離線辨識", ocr_lang));
+                    return ocr_with_offline(&image_data);
+                }
+            } else {
+                return ocr_with_offline(&image_data);
+            }
         }
 
         let engine = match OcrEngine::TryCreateFromLanguage(&language) {
